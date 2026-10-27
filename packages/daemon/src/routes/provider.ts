@@ -146,9 +146,12 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     } catch {
       raw = {};
     }
-    const provider = raw !== null && typeof raw === "object" && !Array.isArray(raw)
-      ? (raw as Record<string, unknown>)["provider"] ?? "codex"
-      : "codex";
+    // Only an ABSENT field defaults to "codex". A PRESENT non-string (null, 42, an object) falls
+    // to the registry check below and is refused with the same 400 naming the known list.
+    const rawProvider = raw !== null && typeof raw === "object" && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>)["provider"]
+      : undefined;
+    const provider = rawProvider === undefined ? "codex" : rawProvider;
     if (!isKnownProviderKind(provider)) {
       return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${String(provider)})` }, 400);
     }
@@ -228,7 +231,9 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if (body["providers"] !== undefined && (!Array.isArray(body["providers"]) || body["provider"] !== undefined)) {
       return c.json({ error: "give either providers (a list) or provider, not both" }, 400);
     }
-    const asked = Array.isArray(body["providers"]) ? body["providers"] : [body["provider"] ?? "codex"];
+    const asked = Array.isArray(body["providers"])
+      ? body["providers"]
+      : [body["provider"] === undefined ? "codex" : body["provider"]];
     const bad = asked.find((p) => !isKnownProviderKind(p));
     if (asked.length === 0 || bad !== undefined) {
       return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${asked.length === 0 ? "none" : String(bad)})` }, 400);
