@@ -359,7 +359,7 @@ describe("rig provider status — usage windows", () => {
 
   it("--provider takes codex or claude only", async () => {
     const r = await run(["status", "--refresh", "--provider", "gemini"], port);
-    expect([r.err, r.exitCode]).toEqual(["--provider must be codex or claude (got gemini)", 1]);
+    expect([r.err, r.exitCode]).toEqual([`--provider must be a known provider kind (known: codex, claude; got gemini)`, 1]);
     expect(posts).toEqual([]);
   });
 

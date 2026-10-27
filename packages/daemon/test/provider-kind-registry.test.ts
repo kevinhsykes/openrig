@@ -66,29 +66,30 @@ describe("provider routes validate against the registry (not a hard-coded pair)"
     expect(refreshUsage).not.toHaveBeenCalled();
   });
 
-  it("a PRESENT but non-string provider (null, 42) is refused on /usage/refresh — only an ABSENT field defaults to codex", async () => {
+  it("a PRESENT but non-string provider (null, 42, an object) is refused on /usage/refresh — only an ABSENT field defaults to codex", async () => {
     const refreshUsage = vi.fn(async () => ({ disabled: true }) as never);
     const app = appWith({ getReadModel: async () => MODEL, refreshUsage });
-    for (const bad of [null, 42]) {
+    for (const bad of [null, 42, { rail: "zai" }]) {
       const res = await app.request("/api/provider/usage/refresh",
         { method: "POST", body: JSON.stringify({ provider: bad }) });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(String(body.error)).toContain("codex, claude");
-      expect(String(body.error)).toContain(String(bad));
+      // Non-strings print as JSON, never `[object Object]`.
+      expect(String(body.error)).toContain(typeof bad === "string" ? bad : JSON.stringify(bad));
     }
     expect(refreshUsage).not.toHaveBeenCalled();
   });
 
-  it("a PRESENT but non-string provider (null, 42) is refused on /usage/hosts/refresh", async () => {
+  it("a PRESENT but non-string provider (null, 42, an object) is refused on /usage/hosts/refresh", async () => {
     const app = appWith({ getReadModel: async () => MODEL, refreshUsage: async () => ({ disabled: true }) as never });
-    for (const bad of [null, 42]) {
+    for (const bad of [null, 42, { rail: "zai" }]) {
       const res = await app.request("/api/provider/usage/hosts/refresh",
         { method: "POST", body: JSON.stringify({ provider: bad }) });
       expect(res.status).toBe(400);
       const body = await res.json();
       expect(String(body.error)).toContain("codex, claude");
-      expect(String(body.error)).toContain(String(bad));
+      expect(String(body.error)).toContain(typeof bad === "string" ? bad : JSON.stringify(bad));
     }
   });
 

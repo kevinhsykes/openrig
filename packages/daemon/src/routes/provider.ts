@@ -104,6 +104,8 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   const svcOf = (c: Context): ProviderService | null =>
     (c.get("providerService" as never) as ProviderService | undefined) ?? null;
   const unavailable = 503 as const;
+  // Error text for a non-string provider value: JSON ("null", "42", "{}"), never `[object Object]`.
+  const shown = (v: unknown): string => (typeof v === "string" ? v : JSON.stringify(v));
   const okProvider = (p: string | undefined): boolean => p === undefined || isKnownProviderKind(p);
   // When present, an account filter must be a non-empty, non-whitespace ref.
   const okAccount = (a: string | undefined): boolean => a === undefined || a.trim().length > 0;
@@ -153,7 +155,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       : undefined;
     const provider = rawProvider === undefined ? "codex" : rawProvider;
     if (!isKnownProviderKind(provider)) {
-      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${String(provider)})` }, 400);
+      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${shown(provider)})` }, 400);
     }
     const token = (raw as Record<string, unknown> | null)?.["claudeToken"];
     if (token !== undefined) {
@@ -236,7 +238,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       : [body["provider"] === undefined ? "codex" : body["provider"]];
     const bad = asked.find((p) => !isKnownProviderKind(p));
     if (asked.length === 0 || bad !== undefined) {
-      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${asked.length === 0 ? "none" : String(bad)})` }, 400);
+      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${asked.length === 0 ? "none" : shown(bad)})` }, 400);
     }
     const providers = [...new Set(asked as ProviderKind[])];
     const hosts = body["hosts"];
