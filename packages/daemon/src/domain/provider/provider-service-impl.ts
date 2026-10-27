@@ -15,6 +15,7 @@ import {
 import { getNodeInventory } from "../node-inventory.js";
 import { RUNTIME_HOME_VAR, seatRuntimeHome, type HomeRuntime } from "../seat-runtime-home.js";
 import { readCodexAuthMetadata, type CodexAuthMetadata } from "./codex-auth-reader.js";
+import { CODEX_SOURCE_ID, codexAccountSource, validateAccountSources, type AccountSource } from "./account-source.js";
 import { collectFourBlockReadModel, type ProviderSeat } from "./provider-collect.js";
 import { configuredSeatAccounts } from "./provider-seat-accounts.js";
 import { precheckSwitch } from "./provider-policy.js";
@@ -100,6 +101,9 @@ export interface ProviderServiceImplDeps {
   agentActivityStore?: Pick<AgentActivityStore, "getLatestForNode">;
   /** W2a tap: operator-visible disposition sink. Observability only; never a verification producer. */
   warn?: (message: string) => void;
+  /** Sources of accounts and bindings beside the Codex one, which the service always builds from its own read. Registered here, where a
+   *  repeated id throws; none: the read model is built from Codex alone, exactly as before. */
+  extraAccountSources?: readonly AccountSource[];
   env?: NodeJS.ProcessEnv;
   now?: () => string;
   /** Slice 01: Codex usage windows, served only while `enabled()` (provider.usage_windows) is true. */
@@ -111,7 +115,9 @@ export interface ProviderServiceImplDeps {
 }
 
 export class ProviderServiceImpl implements ProviderService {
-  constructor(private readonly deps: ProviderServiceImplDeps) {}
+  constructor(private readonly deps: ProviderServiceImplDeps) {
+    if (deps.extraAccountSources) validateAccountSources(deps.extraAccountSources, [CODEX_SOURCE_ID]);
+  }
 
   async getReadModel(): Promise<FourBlockReadModel> {
     const env = this.deps.env ?? process.env;
@@ -143,6 +149,8 @@ export class ProviderServiceImpl implements ProviderService {
         ...collectReactiveSignals(),
       ],
       now: () => asOf,
+      ...(this.deps.extraAccountSources?.length ? { accountSources: [codexAccountSource(readAuth()), ...this.deps.extraAccountSources] } : {}),
+      ...(this.deps.warn ? { warn: this.deps.warn } : {}),
     });
     // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
     const usage = this.usageWindowsEnabled() ? this.deps.usageWindows!.windows.project(asOf) : null;
