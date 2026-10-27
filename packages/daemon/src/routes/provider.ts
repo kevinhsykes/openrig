@@ -11,7 +11,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
-import type { ProviderKind } from "../domain/provider/provider-types.js";
+import { KNOWN_PROVIDER_KINDS_LABEL, isKnownProviderKind, type ProviderKind } from "../domain/provider/provider-types.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
@@ -27,8 +27,6 @@ import {
 // over ONE service read model (filtered projections cannot diverge). Edge validation -> 400; an
 // unsafe precheck is a 200 verdict; switch business outcomes are 200 payloads; an unwired service
 // is a loud 503 (never an empty/fabricated four-block). No collection or policy logic lives here.
-
-const VALID_PROVIDERS = new Set(["codex", "claude"]);
 
 export interface ProviderRoutesOptions {
   /** Tests shorten the deadlines and pin the clock; production uses the named defaults. */
@@ -106,12 +104,12 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   const svcOf = (c: Context): ProviderService | null =>
     (c.get("providerService" as never) as ProviderService | undefined) ?? null;
   const unavailable = 503 as const;
-  const okProvider = (p: string | undefined): boolean => p === undefined || VALID_PROVIDERS.has(p);
+  const okProvider = (p: string | undefined): boolean => p === undefined || isKnownProviderKind(p);
   // When present, an account filter must be a non-empty, non-whitespace ref.
   const okAccount = (a: string | undefined): boolean => a === undefined || a.trim().length > 0;
   // A malformed filter (bad provider enum or empty account) is a 400; returns the message or null.
   const filterError = (provider: string | undefined, account: string | undefined): string | null => {
-    if (!okProvider(provider)) return `invalid provider: ${provider}`;
+    if (!okProvider(provider)) return `invalid provider: ${provider} (known: ${KNOWN_PROVIDER_KINDS_LABEL})`;
     if (!okAccount(account)) return "account must be a non-empty ref";
     return null;
   };
@@ -151,8 +149,8 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     const provider = raw !== null && typeof raw === "object" && !Array.isArray(raw)
       ? (raw as Record<string, unknown>)["provider"] ?? "codex"
       : "codex";
-    if (provider !== "codex" && provider !== "claude") {
-      return c.json({ error: `usage windows can be refreshed for codex or claude (got ${String(provider)})` }, 400);
+    if (!isKnownProviderKind(provider)) {
+      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${String(provider)})` }, 400);
     }
     const token = (raw as Record<string, unknown> | null)?.["claudeToken"];
     if (token !== undefined) {
@@ -231,9 +229,9 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "give either providers (a list) or provider, not both" }, 400);
     }
     const asked = Array.isArray(body["providers"]) ? body["providers"] : [body["provider"] ?? "codex"];
-    const bad = asked.find((p) => p !== "codex" && p !== "claude");
+    const bad = asked.find((p) => !isKnownProviderKind(p));
     if (asked.length === 0 || bad !== undefined) {
-      return c.json({ error: `usage windows can be refreshed for codex or claude (got ${asked.length === 0 ? "none" : String(bad)})` }, 400);
+      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${asked.length === 0 ? "none" : String(bad)})` }, 400);
     }
     const providers = [...new Set(asked as ProviderKind[])];
     const hosts = body["hosts"];
