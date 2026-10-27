@@ -90,6 +90,10 @@
     "./codex-auth": {
       "types": "./dist/codex-auth-surface.d.ts",
       "import": "./dist/codex-auth-surface.js"
+    },
+    "./provider-types": {
+      "types": "./dist/provider-types-surface.d.ts",
+      "import": "./dist/provider-types-surface.js"
     }
   },
   "scripts": {

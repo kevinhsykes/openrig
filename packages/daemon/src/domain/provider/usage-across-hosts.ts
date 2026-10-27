@@ -24,6 +24,7 @@ import type {
   SeatConfiguredAccount,
   UsageAllowanceIdentity,
 } from "./provider-types.js";
+import { isKnownProviderKind, KNOWN_PROVIDER_KINDS_LABEL, type KnownProviderKind } from "./provider-types.js";
 import { USAGE_CLOCK_TOLERANCE_MS } from "./usage-windows.js";
 
 /** Reading a host's served model is an ordinary read: the same 5 s class as the read-through and the feed. */
@@ -47,8 +48,9 @@ export const USAGE_HOSTS_MAX_DEPTH = 32;
 export const BEARER_REDACTED = "[redacted: contained this host's bearer]";
 
 /** A refresh leg waits for the host's own bounded native read plus stopping what it started (Codex 35 s + ~8 s;
- *  Claude's auth status 10 s + ~3 s), with a margin for the network. Never the 5 s read class. */
-export const REMOTE_USAGE_REFRESH_DEADLINE_MS: Record<ProviderKind, number> = { codex: 50_000, claude: 20_000 };
+ *  Claude's auth status 10 s + ~3 s), with a margin for the network. Never the 5 s read class. Keyed by the
+ *  KNOWN_PROVIDER_KINDS registry; a kind with no entry is refused at the lookup (deadlineFor), never `undefined`. */
+export const REMOTE_USAGE_REFRESH_DEADLINE_MS: Readonly<Record<KnownProviderKind, number>> = { codex: 50_000, claude: 20_000 };
 
 export type HostUsageCoverage = "served" | "off" | "older" | "unavailable";
 
@@ -636,7 +638,13 @@ export class UsageRefreshLegs {
   constructor(private readonly opts: { deadlineMs?: Partial<Record<ProviderKind, number>>; now?: () => string } = {}) {}
 
   deadlineFor(provider: ProviderKind): number {
-    return this.opts.deadlineMs?.[provider] ?? REMOTE_USAGE_REFRESH_DEADLINE_MS[provider];
+    const named = this.opts.deadlineMs?.[provider];
+    if (named !== undefined) return named;
+    // A kind with no deadline entry has no remote refresh here: refuse loudly, never wait on `undefined`.
+    if (!isKnownProviderKind(provider)) {
+      throw new Error(`no usage-refresh deadline for provider kind "${provider}" (known: ${KNOWN_PROVIDER_KINDS_LABEL})`);
+    }
+    return REMOTE_USAGE_REFRESH_DEADLINE_MS[provider];
   }
 
   lastFor(hostId: string): Partial<Record<ProviderKind, UsageRefreshLeg>> | undefined {
@@ -673,6 +681,12 @@ export class UsageRefreshLegs {
   /** One leg to a registry host's own refresh route, bounded by the provider's refresh deadline. */
   remote(host: HostEntry, provider: ProviderKind, deps: Pick<UsageHostsDeps, "fetchImpl" | "env" | "readFile">): Promise<UsageRefreshLeg> {
     const now = this.opts.now ?? (() => new Date().toISOString());
+    // A kind this daemon has no reader for gets its OWN failed leg, not run()'s generic leg_failed
+    // (which would read as the host's answer being unreadable). BR-1: the cause is named.
+    if (!isKnownProviderKind(provider)) {
+      return Promise.resolve({ hostId: host.id, provider, at: now(), outcome: "failed", reason: "provider_has_no_reader",
+        detail: `no usage-refresh reader or deadline for provider kind "${provider}" (known: ${KNOWN_PROVIDER_KINDS_LABEL})`, coalesced: false });
+    }
     return this.run(host.id, provider, async () => {
       if (host.transport !== "http") {
         return { at: now(), outcome: "failed", reason: "unsupported_transport", detail: "ssh-declared host; a refresh across hosts needs an http registry entry" };
