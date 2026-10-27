@@ -1,0 +1,304 @@
+{
+  "generatedFrom": "fork/p5-host-rollup-registry base 14fb93bcb (pre-refactor rollupHostUsage)",
+  "purpose": "P5 no-op proof: the registry refactor must reproduce each case's outputJson byte-for-byte",
+  "cases": [
+    {
+      "name": "no signals and no codex presence emits no rows",
+      "input": {
+        "signals": [],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[]"
+    },
+    {
+      "name": "codex presence without signals is an explicit unknown row",
+      "input": {
+        "signals": [],
+        "codexProfilesPresent": true,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"codex\",\"windows\":[],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"explicit_unknown\",\"unknownReason\":\"no usage meter for codex on this host yet (the app-server read lane is a later seam); no fresh at-limit evidence either way\"}]"
+    },
+    {
+      "name": "claude only, one fresh meter, low usage: ok",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-c",
+            "automationUse": "advisory_only",
+            "usedPercent": 10
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":10,\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-c\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"ok\"}]"
+    },
+    {
+      "name": "claude only, meter at the nearing threshold: nearing",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-c",
+            "automationUse": "advisory_only",
+            "usedPercent": 85
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":85,\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-c\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"nearing\"}]"
+    },
+    {
+      "name": "claude only, meter exhausted with resets: limited until the latest reset",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-a",
+            "automationUse": "advisory_only",
+            "usedPercent": 100,
+            "resetsAt": "2026-10-28T03:00:00.000Z"
+          },
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "primary",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-b",
+            "automationUse": "advisory_only",
+            "usedPercent": 100,
+            "resetsAt": "2026-10-28T02:00:00.000Z"
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":100,\"resetsAt\":\"2026-10-28T03:00:00.000Z\",\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-a\"},{\"window\":\"primary\",\"usedPercent\":100,\"resetsAt\":\"2026-10-28T02:00:00.000Z\",\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-b\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-a\",\"seat-b\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"limited\",\"resetsAt\":\"2026-10-28T03:00:00.000Z\"}]"
+    },
+    {
+      "name": "claude only, meter exhausted without reset evidence: limited with resetsAt omitted",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-c",
+            "automationUse": "advisory_only",
+            "usedPercent": 100
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":100,\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-c\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"limited\"}]"
+    },
+    {
+      "name": "claude only, sub-100 meter plus fresh at-limit reactive evidence: limited",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-c",
+            "automationUse": "advisory_only",
+            "usedPercent": 40
+          },
+          {
+            "sourceClass": "provider_event",
+            "authority": "reactive_error",
+            "automationUse": "allow_switch_decision",
+            "staleAfter": "2026-10-27T23:00:00.000Z",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "provider": "claude",
+            "resetsAt": "2026-10-28T04:00:00.000Z",
+            "seatSession": "seat-c"
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":40,\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-c\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"limited\"}]"
+    },
+    {
+      "name": "claude only, expired at-limit evidence is not usage evidence: ok",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-c",
+            "automationUse": "advisory_only",
+            "usedPercent": 10
+          },
+          {
+            "sourceClass": "provider_event",
+            "authority": "reactive_error",
+            "automationUse": "allow_switch_decision",
+            "staleAfter": "2026-10-27T21:00:00.000Z",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "provider": "claude",
+            "seatSession": "seat-c"
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":10,\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-c\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"ok\"}]"
+    },
+    {
+      "name": "claude only, divergent same-window resets: conflicting anomaly, explicit unknown",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-a",
+            "automationUse": "advisory_only",
+            "usedPercent": 20,
+            "resetsAt": "2026-10-28T03:00:00.000Z"
+          },
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-b",
+            "automationUse": "advisory_only",
+            "usedPercent": 30,
+            "resetsAt": "2026-10-28T05:00:00.000Z"
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":20,\"resetsAt\":\"2026-10-28T03:00:00.000Z\",\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-a\"},{\"window\":\"five_hour\",\"usedPercent\":30,\"resetsAt\":\"2026-10-28T05:00:00.000Z\",\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-b\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[{\"kind\":\"conflicting_seat_windows\",\"window\":\"five_hour\",\"seats\":[\"seat-a\",\"seat-b\"],\"evidence\":\"seats report divergent five_hour reset schedules on one host: seat-a resets_at=2026-10-28T03:00:00.000Z vs seat-b resets_at=2026-10-28T05:00:00.000Z\",\"asOf\":\"2026-10-27T22:00:00.000Z\"}],\"evidenceSeats\":[\"seat-a\",\"seat-b\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"explicit_unknown\",\"unknownReason\":\"conflicting_seat_windows: divergent reset schedules falsify the one-account-per-host invariant for this host\"}]"
+    },
+    {
+      "name": "claude only, unknown rows without meters: explicit unknown carrying the lane reason",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "unknown",
+            "authority": "unknown",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "automationUse": "do_not_automate",
+            "unknownReason": "claude_no_statusline_cache_yet",
+            "seatSession": "seat-c"
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"explicit_unknown\",\"unknownReason\":\"claude_no_statusline_cache_yet\"}]"
+    },
+    {
+      "name": "codex only, fresh at-limit reactive evidence: limited until the earliest reset",
+      "input": {
+        "signals": [
+          {
+            "sourceClass": "provider_event",
+            "authority": "reactive_error",
+            "automationUse": "allow_switch_decision",
+            "staleAfter": "2026-10-27T23:00:00.000Z",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "provider": "codex",
+            "resetsAt": "2026-10-28T06:00:00.000Z",
+            "seatSession": "seat-x"
+          }
+        ],
+        "codexProfilesPresent": true,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"codex\",\"windows\":[],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"reactive_event asOf=2026-10-27T22:00:00.000Z\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"limited\",\"resetsAt\":\"2026-10-28T06:00:00.000Z\"}]"
+    },
+    {
+      "name": "both providers: claude ok row then codex explicit unknown row, in output order",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-c",
+            "automationUse": "advisory_only",
+            "usedPercent": 10
+          },
+          {
+            "sourceClass": "provider_event",
+            "authority": "reactive_error",
+            "automationUse": "allow_switch_decision",
+            "staleAfter": "2026-10-27T23:00:00.000Z",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "provider": "codex",
+            "resetsAt": "2026-10-28T06:00:00.000Z"
+          }
+        ],
+        "codexProfilesPresent": true,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":10,\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-c\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"ok\"},{\"host\":\"local\",\"provider\":\"codex\",\"windows\":[],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"reactive_event asOf=2026-10-27T22:00:00.000Z\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"limited\",\"resetsAt\":\"2026-10-28T06:00:00.000Z\"}]"
+    },
+    {
+      "name": "signals for an unregistered provider are ignored by today's default registry",
+      "input": {
+        "signals": [
+          {
+            "provider": "claude",
+            "sourceClass": "provider_statusline",
+            "authority": "account_cross_device",
+            "window": "five_hour",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "seatSession": "seat-c",
+            "automationUse": "advisory_only",
+            "usedPercent": 10
+          },
+          {
+            "sourceClass": "provider_event",
+            "authority": "reactive_error",
+            "automationUse": "allow_switch_decision",
+            "staleAfter": "2026-10-27T23:00:00.000Z",
+            "asOf": "2026-10-27T22:00:00.000Z",
+            "provider": "zai",
+            "resetsAt": "2026-10-28T06:00:00.000Z"
+          }
+        ],
+        "codexProfilesPresent": false,
+        "now": "2026-10-27T22:00:00.000Z"
+      },
+      "outputJson": "[{\"host\":\"local\",\"provider\":\"claude\",\"windows\":[{\"window\":\"five_hour\",\"usedPercent\":10,\"asOf\":\"2026-10-27T22:00:00.000Z\",\"seatSession\":\"seat-c\"}],\"provenance\":{\"basis\":\"one_account_per_host_deployment_invariant\",\"note\":\"host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted.\"},\"anomalies\":[],\"evidenceSeats\":[\"seat-c\"],\"asOf\":\"2026-10-27T22:00:00.000Z\",\"state\":\"ok\"}]"
+    }
+  ]
+}

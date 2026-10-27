@@ -88,16 +88,61 @@ export interface HostUsageRollupInput {
   now: string;
 }
 
-export function rollupHostUsage(input: HostUsageRollupInput): HostUsageRow[] {
+export function rollupHostUsage(
+  input: HostUsageRollupInput,
+  rollups: readonly HostUsageRollup[] = DEFAULT_HOST_USAGE_ROLLUPS,
+): HostUsageRow[] {
   const rows: HostUsageRow[] = [];
-
-  const claude = rollupClaude(input);
-  if (claude) rows.push(claude);
-
-  const codex = rollupCodex(input);
-  if (codex) rows.push(codex);
-
+  for (const entry of rollups) {
+    try {
+      const row = entry.rollup(input);
+      if (row) rows.push(row);
+    } catch (error) {
+      // A broken rollup must not take down the read model (it has ~10 callers) and must not
+      // silently drop the host row: emit this provider's honest explicit_unknown, keep the rest.
+      const detail = error instanceof Error ? error.message : String(error);
+      rows.push({
+        host: "local",
+        provider: entry.provider,
+        state: "explicit_unknown",
+        windows: [],
+        provenance: { basis: "one_account_per_host_deployment_invariant", note: PROVENANCE_NOTE },
+        anomalies: [],
+        evidenceSeats: [],
+        unknownReason: `host usage rollup for ${entry.provider} failed: ${detail}`,
+        asOf: input.now,
+      });
+    }
+  }
   return rows;
+}
+
+/** One provider's host rollup: the (host, provider) row for this daemon, or null when the
+ *  provider has no deployment presence here (no row — an absent reading is never a fabricated ok). */
+export interface HostUsageRollup {
+  provider: ProviderKind;
+  rollup(input: HostUsageRollupInput): HostUsageRow | null;
+}
+
+const claudeRollup: HostUsageRollup = { provider: "claude", rollup: rollupClaude };
+const codexRollup: HostUsageRollup = { provider: "codex", rollup: rollupCodex };
+
+/** The shipped registry, in today's output order. Never mutated: later patches add rollups via
+ *  hostUsageRollupsWith and pass the built list to rollupHostUsage. */
+export const DEFAULT_HOST_USAGE_ROLLUPS: readonly HostUsageRollup[] = [claudeRollup, codexRollup];
+
+/** The default list plus `extras`, validated AT REGISTRATION: a duplicate provider throws here —
+ *  never mid-rollup, where it would take the read model's callers with it. Returns a fresh array;
+ *  nothing global is mutated. */
+export function hostUsageRollupsWith(extras: readonly HostUsageRollup[] = []): HostUsageRollup[] {
+  const seen = new Set<ProviderKind>();
+  for (const entry of [...DEFAULT_HOST_USAGE_ROLLUPS, ...extras]) {
+    if (seen.has(entry.provider)) {
+      throw new Error(`duplicate host usage rollup registered for provider "${entry.provider}"`);
+    }
+    seen.add(entry.provider);
+  }
+  return [...DEFAULT_HOST_USAGE_ROLLUPS, ...extras];
 }
 
 // ——— Claude: seat-keyed statusline readings and typed provider failures ———
