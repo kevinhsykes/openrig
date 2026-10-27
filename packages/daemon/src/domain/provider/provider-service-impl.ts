@@ -34,6 +34,7 @@ import type {
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderKind, ProviderSignal } from "./provider-types.js";
+import { isKnownProviderKind } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
 
@@ -170,11 +171,13 @@ export class ProviderServiceImpl implements ProviderService {
   }
 
   async refreshUsage(provider: ProviderKind, token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {
+    // BR-1 first: a kind outside the known rails has no reader here — { unavailable: true } even
+    // while the switch is off. Known kinds keep the disabled gate below.
+    if (!isKnownProviderKind(provider)) return { unavailable: true };
     if (!this.usageWindowsEnabled()) return { disabled: true };
     if (provider === "claude" && token) return this.deps.usageWindows!.claudeTokens?.refresh(token) ?? { unavailable: true };
     if (provider === "claude") return this.deps.usageWindows!.claude?.refresh() ?? { unavailable: true };
     if (provider === "codex") return this.deps.usageWindows!.windows.refresh();
-    // BR-1: this daemon has no reader for a kind outside the known rails — say so; never serve Codex's windows for it.
     return { unavailable: true };
   }
 

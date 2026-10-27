@@ -66,6 +66,32 @@ describe("provider routes validate against the registry (not a hard-coded pair)"
     expect(refreshUsage).not.toHaveBeenCalled();
   });
 
+  it("a PRESENT but non-string provider (null, 42) is refused on /usage/refresh — only an ABSENT field defaults to codex", async () => {
+    const refreshUsage = vi.fn(async () => ({ disabled: true }) as never);
+    const app = appWith({ getReadModel: async () => MODEL, refreshUsage });
+    for (const bad of [null, 42]) {
+      const res = await app.request("/api/provider/usage/refresh",
+        { method: "POST", body: JSON.stringify({ provider: bad }) });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(String(body.error)).toContain("codex, claude");
+      expect(String(body.error)).toContain(String(bad));
+    }
+    expect(refreshUsage).not.toHaveBeenCalled();
+  });
+
+  it("a PRESENT but non-string provider (null, 42) is refused on /usage/hosts/refresh", async () => {
+    const app = appWith({ getReadModel: async () => MODEL, refreshUsage: async () => ({ disabled: true }) as never });
+    for (const bad of [null, 42]) {
+      const res = await app.request("/api/provider/usage/hosts/refresh",
+        { method: "POST", body: JSON.stringify({ provider: bad }) });
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(String(body.error)).toContain("codex, claude");
+      expect(String(body.error)).toContain(String(bad));
+    }
+  });
+
   it("POST /usage/refresh with a known kind still reaches the service (behavior unchanged)", async () => {
     const refreshUsage = vi.fn(async () => ({ disabled: true }) as never);
     const res = await appWith({ getReadModel: async () => MODEL, refreshUsage })
@@ -121,6 +147,19 @@ describe("ProviderServiceImpl.refreshUsage (BR-1 after the widening)", () => {
     const r = await refreshSvc({ enabled: () => true, refresh }).refreshUsage("codex");
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(r).toBe(answer);
+  });
+
+  it("the unknown-kind refusal comes BEFORE the disabled gate: with usage windows off, an unknown kind still answers { unavailable: true }", async () => {
+    const refresh = vi.fn(async () => ({}) as never);
+    const r = await refreshSvc({ enabled: () => false, refresh }).refreshUsage("zai");
+    expect(r).toEqual({ unavailable: true });
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("known kinds keep the disabled gate: with usage windows off they answer { disabled: true }", async () => {
+    const svc = refreshSvc({ enabled: () => false, refresh: vi.fn(async () => ({}) as never) });
+    expect(await svc.refreshUsage("codex")).toEqual({ disabled: true });
+    expect(await svc.refreshUsage("claude")).toEqual({ disabled: true });
   });
 });
 
