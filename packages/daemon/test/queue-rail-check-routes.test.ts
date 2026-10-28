@@ -61,7 +61,7 @@ function harness(env: Record<string, string>, run: RunHook) {
 
 // only dev-b is exhausted; dev-a (where the helper opens the first row) is fine
 const exhausted: RunHook = async (argv) => argv[argv.length - 1] === "dev-b@rig1"
-  ? { code: 3, stdout: "dev-b@rig1: rail EXHAUSTED, resets 2026-11-03", timedOut: false }
+  ? { code: 3, stdout: "verdict=EXHAUSTED\ndev-b@rig1: rail EXHAUSTED, resets 2026-11-03", timedOut: false }
   : { code: 0, stdout: "", timedOut: false };
 const fine: RunHook = async () => ({ code: 0, stdout: "", timedOut: false });
 const create = (to: string, extra: Record<string, unknown> = {}) => ({ sourceSession: "dev-a@rig1", destinationSession: to, body: "work", summary: "s", evidenceRef: "evidence/x.md", nudge: false, ...extra });
@@ -120,6 +120,14 @@ describe("the destination rail check on the queue routes (P29)", () => {
       expect(res.status).toBe(409);
       expect(await res.json()).toMatchObject({ error: "destination_rail_exhausted", destinationSession: "dev-b@rig1", message: expect.stringContaining("EXHAUSTED") });
       expect(h.rows()).toHaveLength(0);
+    });
+
+    it("P29b: code 3 listed as refusing but the checker says UNKNOWN (no verdict token): the row is written with a warning", async () => {
+      h = harness(ENV_REFUSE, async () => ({ code: 3, stdout: "dev-b@rig1: rail UNKNOWN, no reading", timedOut: false }));
+      const res = await h.post("/api/queue/create", create("dev-b@rig1"));
+      expect(res.status).toBe(201);
+      expect(h.rows()).toHaveLength(1);
+      expect(JSON.stringify(await res.json())).toContain("not confirmed");
     });
 
     it("create: allowExhaustedDestination writes the row, tags the override, and still warns", async () => {

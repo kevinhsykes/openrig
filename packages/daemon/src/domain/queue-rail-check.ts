@@ -80,6 +80,10 @@ export const execFileHook: RunHook = (argv, timeoutMs) =>
     });
   });
 
+/** The first stdout line a checker prints to say a rail is EXHAUSTED (P29b); refuse mode refuses on nothing else. */
+export const EXHAUSTED_VERDICT = "verdict=EXHAUSTED";
+const firstLine = (stdout: string): string => (stdout.split(/\r?\n/, 1)[0] ?? "").trim();
+
 export class QueueDestinationChecker {
   private readonly cache = new Map<string, { at: number; result: DestinationCheckResult }>();
   private readonly inFlight = new Map<string, Promise<DestinationCheckResult>>();
@@ -126,9 +130,18 @@ export class QueueDestinationChecker {
     if (out.timedOut) { debug(`[queue-destination-check] ${session}: the hook did not answer within ${config.timeoutMs} ms`); return { kind: "error", reason: "the hook timed out" }; }
     if (out.code === 0) return { kind: "ok" };
     const code = out.code ?? 1;
-    const text = out.stdout.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").trim().slice(0, MAX_MESSAGE_CHARS);
-    const message = text !== "" ? text : `the destination check exited ${code} for ${session}`;
-    if (config.mode === "refuse" && config.refuseCodes.includes(code)) return { kind: "refuse", code, message };
+    const confirmed = firstLine(out.stdout) === EXHAUSTED_VERDICT;
+    // The token line is for the daemon; the person reads the explanation after it.
+    const body = confirmed ? out.stdout.replace(/^[^\r\n]*(\r?\n|$)/, "") : out.stdout;
+    const text = body.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "").trim().slice(0, MAX_MESSAGE_CHARS);
+    const message = text !== "" ? text : confirmed ? `the destination check says the rail is EXHAUSTED for ${session}` : `the destination check exited ${code} for ${session}`;
+    // P29b: refusing needs two things, not one. The exit code is listed AND the checker said so in words: its first stdout line is
+    // exactly `verdict=EXHAUSTED`. A checker that uses one code for EXHAUSTED and UNKNOWN, with that code listed, therefore still
+    // only warns on UNKNOWN. A listed code without the token warns and says the verdict was not confirmed.
+    if (config.mode === "refuse" && config.refuseCodes.includes(code)) {
+      if (confirmed) return { kind: "refuse", code, message };
+      return { kind: "warn", code, message: `${message} (exit ${code} is a refusing code, but the checker did not print ${EXHAUSTED_VERDICT} as its first line, so the verdict is not confirmed EXHAUSTED and the row was sent)` };
+    }
     if (config.warnCodes.includes(code) || config.refuseCodes.includes(code)) return { kind: "warn", code, message };
     debug(`[queue-destination-check] ${session}: the hook exited ${code}, which is not a listed code; no warning`);
     return { kind: "error", reason: `unlisted exit code ${code}` };

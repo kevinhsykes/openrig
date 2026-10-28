@@ -85,8 +85,21 @@ describe("QueueDestinationChecker", () => {
   describe("refuse mode", () => {
     const REFUSE = { ...ENV, OPENRIG_QUEUE_DESTINATION_CHECK_MODE: "refuse", OPENRIG_QUEUE_DESTINATION_CHECK_REFUSE_CODES: "[3]" };
     it("refuses only on a code listed as refusing; the other warn code still only warns", async () => {
-      expect(await checker(REFUSE, hook(3, "EXHAUSTED")).c.check("x@r")).toMatchObject({ kind: "refuse", code: 3 });
+      expect(await checker(REFUSE, hook(3, "verdict=EXHAUSTED\nx@r: rail EXHAUSTED")).c.check("x@r")).toMatchObject({ kind: "refuse", code: 3 });
       expect(await checker(REFUSE, hook(4, "UNKNOWN")).c.check("x@r")).toMatchObject({ kind: "warn", code: 4 });   // never refuses on UNKNOWN
+    });
+    // P29b: a checker that uses code 3 for both EXHAUSTED and UNKNOWN, with 3 listed as refusing, must not refuse UNKNOWN.
+    it("P29b: the same code 3 for UNKNOWN (no verdict token on the first line) warns and says the verdict is not confirmed", async () => {
+      for (const out of ["x@r: rail UNKNOWN", "x@r: rail EXHAUSTED", "note\nverdict=EXHAUSTED", "verdict=EXHAUSTED-ish", ""]) {
+        const r = await checker(REFUSE, hook(3, out)).c.check("x@r");
+        expect(r, out).toMatchObject({ kind: "warn", code: 3 });
+        expect((r as { message: string }).message).toContain("not confirmed");
+      }
+    });
+    it("P29b: the token alone on the first line (CRLF and padding allowed) refuses", async () => {
+      for (const out of ["verdict=EXHAUSTED", "  verdict=EXHAUSTED  \r\nrest", "verdict=EXHAUSTED\n"]) {
+        expect(await checker(REFUSE, hook(3, out)).c.check("x@r"), out).toMatchObject({ kind: "refuse", code: 3 });
+      }
     });
     it("with no refuse codes configured it never refuses, whatever the code", async () => {
       const env = { ...ENV, OPENRIG_QUEUE_DESTINATION_CHECK_MODE: "refuse" };
