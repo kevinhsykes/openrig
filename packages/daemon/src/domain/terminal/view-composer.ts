@@ -172,8 +172,8 @@ export function composeView(
         seat: m.seat,
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
-        paneCommand: `ssh ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
-        recoveryCommand: `ssh ${shellQuote(dest)} ${shellQuote(`tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`)}`,
+        paneCommand: `ssh -tt ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
+        recoveryCommand: `ssh -tt ${shellQuote(dest)} ${shellQuote(`tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`)}`,
         readOnly: m.readOnly,
       });
       continue;
