@@ -10,6 +10,9 @@
 # It also keeps Pi's chat screen up, so a seat never falls back to a bare shell:
 #   - OPENRIG_MODEL (the seat's model) becomes --model, and OPENRIG_EFFORT becomes --thinking when it is one of Pi's
 #     levels (off, minimal, low, medium, high, xhigh, max); any other effort is named on stderr and Pi starts without one;
+#   - OPENRIG_PI_APPEND_SYSTEM_PROMPT (an absolute path to a readable file) becomes --append-system-prompt on EVERY start,
+#     a relaunch and a resume included, so a seat's role survives compaction. A path that is not a readable file is refused
+#     by name and nothing starts, since Pi would read it as the prompt text;
 #   - --no-approve is always passed, so Pi doesn't stop at its "trust this project folder?" dialog;
 #   - when Pi exits it is started again, on the same session (the one file with that id, else the same id again), after a
 #     back-off that doubles from 2 s to 60 s. Quick exits are counted; a start that ran for 60 s resets the count; more than
@@ -27,6 +30,23 @@ model="${OPENRIG_MODEL:-}"
 case "$model" in
   -*) echo "openrig-pi-tui-launch: OPENRIG_MODEL '$model' would read as a Pi flag; starting nothing" >&2; exit 2 ;;
 esac
+# The seat's role and its standing notes, as a system-prompt file Pi appends on EVERY start (a relaunch and a resume too), so
+# they outlive compaction. Pi reads the value as the text itself when it is not a file, so a path that is not a readable
+# regular file would silently become the prompt: refuse it by name. An absolute path, and none that would read as a flag.
+append_prompt="${OPENRIG_PI_APPEND_SYSTEM_PROMPT:-}"
+if [ -n "$append_prompt" ]; then
+  case "$append_prompt" in
+    -*) echo "openrig-pi-tui-launch: OPENRIG_PI_APPEND_SYSTEM_PROMPT '$append_prompt' would read as a Pi flag; starting nothing" >&2; exit 2 ;;
+    /*) ;;
+    *) echo "openrig-pi-tui-launch: OPENRIG_PI_APPEND_SYSTEM_PROMPT '$append_prompt' isn't an absolute path; starting nothing" >&2; exit 2 ;;
+  esac
+  if [ ! -f "$append_prompt" ]; then
+    echo "openrig-pi-tui-launch: OPENRIG_PI_APPEND_SYSTEM_PROMPT '$append_prompt' isn't a file; starting nothing" >&2; exit 2
+  fi
+  if [ ! -r "$append_prompt" ]; then
+    echo "openrig-pi-tui-launch: OPENRIG_PI_APPEND_SYSTEM_PROMPT '$append_prompt' isn't readable; starting nothing" >&2; exit 2
+  fi
+fi
 thinking=""
 if [ -n "${OPENRIG_EFFORT:-}" ]; then
   case "$OPENRIG_EFFORT" in
@@ -109,6 +129,7 @@ run_pi() {
   set -- --session-dir "$sessions" "$1" "$2"
   if [ -n "$model" ]; then set -- "$@" --model "$model"; fi
   if [ -n "$thinking" ]; then set -- "$@" --thinking "$thinking"; fi
+  if [ -n "$append_prompt" ]; then set -- "$@" --append-system-prompt "$append_prompt"; fi
   set -- "$@" --no-approve
   if [ "$start_first" = 1 ] && [ -n "$first_input" ]; then set -- "$@" -- "$first_input"; fi
   if [ "$start_mode" = exec ]; then exec "$pi" "$@"; fi

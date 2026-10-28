@@ -194,6 +194,76 @@ exit "$2"
     });
   });
 
+  // P17b: a seat's role and its "run rig whoami" note must survive compaction and resume, so they ride Pi's system prompt
+  // (--append-system-prompt), on EVERY start, and not only in the first input.
+  describe("persistent system prompt (OPENRIG_PI_APPEND_SYSTEM_PROMPT)", () => {
+    function roleFile(name = "role.md", text = "ROLE TEXT\n") {
+      const dir = mkdtempSync(join(tmpdir(), "pi-tui-role-")); dirs.push(dir);
+      const path = join(dir, name);
+      writeFileSync(path, text);
+      return path;
+    }
+    const at = (call: string[], flag: string) => call.slice(call.indexOf(flag), call.indexOf(flag) + 2);
+
+    it("passes the file to Pi's --append-system-prompt, ahead of --no-approve", () => {
+      const role = roleFile();
+      const { calls, sessions } = launch({ env: { OPENRIG_PI_RELAUNCH: "0", OPENRIG_PI_APPEND_SYSTEM_PROMPT: role } });
+      expect(calls[0]).toEqual(["--session-dir", sessions, "--session-id", NAME, "--append-system-prompt", role, "--no-approve"]);
+    });
+
+    it("passes it on every relaunch, not only the first start", () => {
+      const role = roleFile();
+      const { calls } = launch({ env: { OPENRIG_PI_MAX_RESTARTS: "2", OPENRIG_PI_APPEND_SYSTEM_PROMPT: role } });
+      expect(calls).toHaveLength(3);
+      for (const call of calls) expect(at(call, "--append-system-prompt")).toEqual(["--append-system-prompt", role]);
+    });
+
+    it("passes it when the seat resumes a conversation too", () => {
+      const role = roleFile();
+      const { calls } = launch({ setup: (sessions) => addSession(sessions, NAME),
+        env: { OPENRIG_PI_RELAUNCH: "0", OPENRIG_RESUME_REF: NAME, OPENRIG_PI_APPEND_SYSTEM_PROMPT: role } });
+      expect(calls[0]).toContain("--session");
+      expect(at(calls[0]!, "--append-system-prompt")).toEqual(["--append-system-prompt", role]);
+    });
+
+    it("keeps the first input as the last, exact argument, and the role path as one argument when it has a space", () => {
+      const role = roleFile("my role.md");
+      const { calls } = launch({ firstInput: "FIRST TURN", env: { OPENRIG_PI_RELAUNCH: "0", OPENRIG_PI_APPEND_SYSTEM_PROMPT: role } });
+      expect(at(calls[0]!, "--append-system-prompt")).toEqual(["--append-system-prompt", role]);
+      expect(calls[0]!.slice(-2)).toEqual(["--", "FIRST TURN"]);
+    });
+
+    it.each([undefined, ""])("passes no --append-system-prompt when the variable is %j", (value) => {
+      const { calls } = launch({ env: { OPENRIG_PI_RELAUNCH: "0", ...(value === undefined ? {} : { OPENRIG_PI_APPEND_SYSTEM_PROMPT: value }) } });
+      expect(flags(calls[0]!)).not.toContain("--append-system-prompt");
+    });
+
+    // Pi reads the value as text when it is not a file, so a path that is not a file would silently become the prompt.
+    it.each([
+      ["a missing file", () => join(tmpdir(), "pi-tui-no-such-role.md"), "isn't a file"],
+      ["a directory", () => roleFile() && join(roleFile(), ".."), "isn't a file"],
+      ["a relative path", () => "role.md", "absolute"],
+      ["a path that reads as a Pi flag", () => "-role.md", "Pi flag"],
+    ])("refuses %s by name and starts nothing", (_label, make, why) => {
+      const { calls, exit, stderr } = launch({ env: { OPENRIG_PI_RELAUNCH: "0", OPENRIG_PI_APPEND_SYSTEM_PROMPT: make() } });
+      expect(calls).toEqual([]);
+      expect(exit).toBe(2);
+      expect(stderr).toContain("OPENRIG_PI_APPEND_SYSTEM_PROMPT");
+      expect(stderr).toContain(why);
+    });
+
+    it("refuses an unreadable role file by name and starts nothing", () => {
+      const role = roleFile();
+      chmodSync(role, 0o000);
+      try {
+        const { calls, exit, stderr } = launch({ env: { OPENRIG_PI_RELAUNCH: "0", OPENRIG_PI_APPEND_SYSTEM_PROMPT: role } });
+        expect(calls).toEqual([]);
+        expect(exit).toBe(2);
+        expect(stderr).toContain("readable");
+      } finally { chmodSync(role, 0o600); }
+    });
+  });
+
   describe("relaunch", () => {
     it("starts Pi again when it exits, up to the bound, then gives up loudly with a non-zero status", () => {
       const { calls, exit, stderr } = launch({ env: { OPENRIG_PI_MAX_RESTARTS: "3" } });

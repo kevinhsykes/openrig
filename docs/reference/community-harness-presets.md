@@ -231,6 +231,12 @@ on it, not Pi choosing by itself to park or hand work on.
   becomes `--thinking` when it's one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), and any other
   effort is named on stderr and left out. `--no-approve` is always passed, so Pi doesn't stop at its "trust this project folder?"
   dialog.
+- **A role that outlasts compaction:** a seat's startup `.md` files are not delivered to a community harness (the adapter takes
+  no startup files), and a first input is one turn that compaction can drop. For text that must stay, set
+  `OPENRIG_PI_APPEND_SYSTEM_PROMPT` to the absolute path of a readable file: the launcher passes it as Pi's
+  `--append-system-prompt` on every start, a relaunch and a resume included. A path that isn't a readable file is refused by
+  name and nothing starts, because Pi would read it as the prompt text. OpenRig doesn't set this variable (the `OPENRIG_`
+  prefix is reserved), so a wrapper that runs before the launcher does.
 - **Kept up:** when Pi exits, the launcher starts it again on the same session (the one file whose header has the name, else the
   same name again), after a back-off that doubles from 2 s to 60 s. A start that ran for 60 s resets the count; after more than 5
   quick exits in a row the launcher says so on stderr and exits 1, and the seat's pane is then at a shell, which OpenRig reports as
