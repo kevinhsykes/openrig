@@ -266,6 +266,8 @@ export interface QueueItem {
    *  Null when the task is unambiguously the rig's default_repo or
    *  ambiguity is absent. Stored as a dedicated TEXT column (migration 038). */
   targetRepo: string | null;
+  /** D4222 — the caller's dedupe key while the row is open at its destination; absent when the row has none. */
+  dedupeKey?: string;
 }
 
 interface QueueItemRow {
@@ -287,6 +289,7 @@ interface QueueItemRow {
   human_intent?: "decision" | "update" | null;
   human_detail?: string | null;
   reply_to?: string | null;
+  dedupe_key?: string | null;
   human_questions?: string | null;
   human_answers?: string | null;
   delegated_decision?: string | null;
@@ -386,6 +389,9 @@ export interface QueueCreateInput {
   /** OPR.0.4.4.19 FR-5 — optional durable-artifact pointer. Persisted when
    *  present; required at the domain layer only for human-routed items. */
   evidenceRef?: string | null;
+  /** D4222 — at most one OPEN row per (destination, key). A create that finds one returns it and writes nothing;
+   *  a closed row frees the key. A database without the column refuses the create instead of ignoring the key. */
+  dedupeKey?: string | null;
   /**
    * R1 fix (PL-004 Phase A revision): Phase A is durable + waking by default.
    * When true (or omitted), the repository nudges the destination after the
@@ -612,6 +618,19 @@ export function isQitemPrimaryKeyConflict(err: unknown): boolean {
   const code = (err as { code?: string }).code ?? "";
   if (code === "SQLITE_CONSTRAINT_PRIMARYKEY" || code === "SQLITE_CONSTRAINT_UNIQUE") return true;
   return /UNIQUE constraint failed: queue_items\.qitem_id/.test(err.message);
+}
+
+/** D4222: the longest dedupe key a create may carry. */
+const DEDUPE_KEY_MAX_LENGTH = 200;
+
+/**
+ * D4222: is this the partial unique index on (destination_session, dedupe_key)? Distinct from
+ * isQitemPrimaryKeyConflict, which accepts ANY unique violation: a same-id, same-key retry is reported against
+ * THIS index and not the primary key, so the two classifiers are tried in order, id first.
+ */
+export function isDedupeKeyConflict(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  return (err as { code?: string }).code === "SQLITE_CONSTRAINT_UNIQUE" && /queue_items\.dedupe_key/.test(err.message);
 }
 
 /**
@@ -941,6 +960,7 @@ export class QueueRepository {
   private readonly hasEvidenceRefColumn: boolean;
   private readonly hasMintingGenColumn: boolean;
   private readonly hasClaimedGenColumn: boolean;
+  private readonly hasDedupeKeyColumn: boolean;
   private readonly hasQueueTransitionsTable: boolean;
   private readonly hasTransitionProvenanceColumn: boolean;
   private readonly hasOwnerNotificationColumns: boolean;
@@ -1031,6 +1051,7 @@ export class QueueRepository {
     // harness degrades (writers skip the columns; the release predicate never matches unstamped rows).
     this.hasMintingGenColumn = detectQueueColumn(db, "minting_generation_uuid");
     this.hasClaimedGenColumn = detectQueueColumn(db, "claimed_by_generation_uuid");
+    this.hasDedupeKeyColumn = detectQueueColumn(db, "dedupe_key");
 
     // OPR.0.3.2.20 — register the EXACT human-seat regex predicate as
     // a SQLite function so the attention query can apply the strict
@@ -1821,6 +1842,8 @@ export class QueueRepository {
   async create(input: QueueCreateInput): Promise<QueueItem & {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
+    /** Response-only: an open row already held the dedupeKey, and it is returned unchanged. Never stored. */
+    deduped?: true;
   }> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
@@ -1894,6 +1917,13 @@ export class QueueRepository {
           );
         }
       }
+      // D4222: a different id, the same destination and key, while an open row holds it. The transaction has rolled
+      // back whole, so nothing was written, no event, no wake. The id branch above runs first: a retried forward
+      // (same id, same key) is reported against the dedupe index too, and finds its own row there.
+      if (input.dedupeKey != null && isDedupeKeyConflict(err)) {
+        const hit = this.dedupeHit(input, input.dedupeKey.trim());
+        if (hit) return hit;
+      }
       throw err;
     }
     this.eventBus.notifySubscribers(persistedEvent);
@@ -1960,6 +1990,7 @@ export class QueueRepository {
     qitemId: string;
     persistedEvent: PersistedEvent;
   } {
+    const dedupeKey = this.checkedDedupeKey(input.dedupeKey);
     // OPR.0.4.4.19 FR-4/FR-5 — human-routed items require summary +
     // evidence_ref at the domain write path (the validateClosure pattern).
     // The validator is a no-op for non-human-routed items (BR-1).
@@ -2035,6 +2066,7 @@ export class QueueRepository {
     }
     this.persistSummary(id, input.summary ?? null);
     this.persistEvidenceRef(id, input.evidenceRef ?? null);
+    this.persistDedupeKey(id, dedupeKey);
     if (this.hasHumanIntentColumn) {
       this.db.prepare("UPDATE queue_items SET human_intent = ?, human_detail = ? WHERE qitem_id = ?")
         .run(input.humanIntent ?? null, input.humanDetail ?? null, id);
@@ -3045,6 +3077,9 @@ export class QueueRepository {
         { currentState: qitem.state, requestedState: input.state },
       );
     }
+
+    // D4222: a reopen moves a row back into the open states, where one row per (destination, key) may stand.
+    if (isReopen) this.assertDedupeKeyFree(qitem);
 
     const validation = validateClosure({
       state: input.state,
@@ -4677,6 +4712,11 @@ export class QueueRepository {
     const nextResolution = kept ? `${kept}\n${fallbackLine}` : fallbackLine;
 
     const txn = this.db.transaction(() => {
+      // D4222: the dedupe key belongs to the original destination. When an open row at the fallback already holds
+      // it, this row moves without the key: delivery matters more than the key.
+      const dropKey = Boolean(qitem.dedupeKey) && isBlockerLive(qitem.state)
+        && Boolean(this.openDedupeHolder(fallbackDestination, qitem.dedupeKey!, qitemId));
+      if (dropKey) this.db.prepare("UPDATE queue_items SET dedupe_key = NULL WHERE qitem_id = ?").run(qitemId);
       this.db
         .prepare(
           `UPDATE queue_items
@@ -4698,7 +4738,8 @@ export class QueueRepository {
         qitemId,
         state: qitem.state,
         actorSession: FALLBACK_ACTOR,
-        transitionNote: `fallback-routed: ${originalDestination} → ${fallbackDestination} (${reason})`,
+        transitionNote: `fallback-routed: ${originalDestination} → ${fallbackDestination} (${reason})`
+          + (dropKey ? `; dedupe key '${qitem.dedupeKey}' dropped: ${fallbackDestination} already holds it` : ""),
         closureTarget: qitem.state === "in-progress" ? this.retainedClaimBlocker(qitemId) : undefined,
       });
 
@@ -4722,6 +4763,86 @@ export class QueueRepository {
       throw new QueueRepositoryError("qitem_not_found", `qitem ${qitemId} not found after write`);
     }
     return item;
+  }
+
+  /** D4222 — the key as it will be stored (trimmed), or null when the create names none. A key the caller got wrong
+   *  is refused, and so is a key on a database without the column: nothing could keep it unique there. */
+  private checkedDedupeKey(raw: string | null | undefined): string | null {
+    if (raw == null) return null;
+    const key = typeof raw === "string" ? raw.trim() : "";
+    if (!key || key.length > DEDUPE_KEY_MAX_LENGTH || /[\u0000-\u001f\u007f]/.test(key)) {
+      throw new QueueRepositoryError(
+        "invalid_dedupe_key",
+        `dedupeKey must be 1 to ${DEDUPE_KEY_MAX_LENGTH} characters with no control characters; nothing was written.`,
+      );
+    }
+    if (!this.hasDedupeKeyColumn) {
+      throw new QueueRepositoryError(
+        "dedupe_unsupported",
+        "This daemon's queue schema has no dedupe_key column, so it cannot keep the key unique. The create was refused and nothing was written.",
+      );
+    }
+    return key;
+  }
+
+  /** D4222 — the open row, if any, that holds `key` at `destination` (never `exceptQitemId` itself). */
+  private openDedupeHolder(destination: string, key: string, exceptQitemId?: string): QueueItem | undefined {
+    if (!this.hasDedupeKeyColumn) return undefined;
+    const row = this.db.prepare(
+      `SELECT qitem_id FROM queue_items
+        WHERE destination_session = ? AND dedupe_key = ? AND state IN ('pending', 'in-progress', 'blocked')
+          AND qitem_id IS NOT ?
+        LIMIT 1`,
+    ).get(destination, key, exceptQitemId ?? null) as { qitem_id: string } | undefined;
+    return row ? this.getById(row.qitem_id) ?? undefined : undefined;
+  }
+
+  /** D4222 — a create that found its key held: the open row, unchanged. A key held by another source is a named
+   *  conflict (the mirror of qitem_id_reuse); a changed body is reported, never saved. */
+  private dedupeHit(
+    input: QueueCreateInput,
+    key: string,
+  ): (QueueItem & { createWarning?: { code: "qitem_body_not_saved"; message: string }; deduped: true }) | null {
+    const open = this.openDedupeHolder(input.destinationSession, key);
+    if (!open) return null;
+    if (open.sourceSession !== input.sourceSession) {
+      throw new QueueRepositoryError(
+        "dedupe_key_conflict",
+        `dedupe key '${key}' is held at ${input.destinationSession} by open row ${open.qitemId}, raised by a different source. Nothing was written.`,
+        { dedupeKey: key, existingQitemId: open.qitemId, existingSource: open.sourceSession },
+      );
+    }
+    return {
+      ...open,
+      deduped: true,
+      ...(open.body !== input.body
+        ? {
+          createWarning: {
+            code: "qitem_body_not_saved" as const,
+            message: `dedupe key '${key}' is held by open row ${open.qitemId} with a different body. The supplied body was not saved; the existing row is returned unchanged. No new work or delivery was created.`,
+          },
+        }
+        : {}),
+    };
+  }
+
+  /** D4222 — a reopen would make a second open holder of the row's key. */
+  private assertDedupeKeyFree(qitem: QueueItem): void {
+    if (!qitem.dedupeKey) return;
+    const other = this.openDedupeHolder(qitem.destinationSession, qitem.dedupeKey, qitem.qitemId);
+    if (other) {
+      throw new QueueRepositoryError(
+        "dedupe_key_open_elsewhere",
+        `qitem ${qitem.qitemId} holds dedupe key '${qitem.dedupeKey}' at ${qitem.destinationSession}, and open row ${other.qitemId} holds it now; one open row may. Nothing was changed. Close ${other.qitemId} first.`,
+        { qitemId: qitem.qitemId, otherQitemId: other.qitemId, dedupeKey: qitem.dedupeKey },
+      );
+    }
+  }
+
+  /** D4222 — store the key inside the create transaction. A second open holder fails HERE, on the unique index,
+   *  and rolls the whole create back. */
+  private persistDedupeKey(qitemId: string, key: string | null): void {
+    if (key !== null) this.db.prepare("UPDATE queue_items SET dedupe_key = ? WHERE qitem_id = ?").run(key, qitemId);
   }
 
   /** OPR.0.4.1.18 — persist the optional human-readable summary additively.
@@ -4964,6 +5085,7 @@ export class QueueRepository {
       // PL-007: target_repo present only when migration 038 has applied;
       // older test fixtures supply legacy rows where target_repo is undefined.
       targetRepo: row.target_repo ?? null,
+      ...(row.dedupe_key ? { dedupeKey: row.dedupe_key } : {}),
     };
   }
 }

@@ -886,6 +886,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
     .option("--human-questions-file <path>", "#193: JSON array of 1-4 questions for a decision, each {id, question, options: [{id, label, recommended?}]} with 2-4 options; Slack shows them as buttons")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
+    .option("--dedupe-key <key>", "Keep at most one OPEN row per destination and key: when one is open, it is returned and nothing is written (a closed row frees the key). 1 to 200 characters. A daemon that cannot keep the key unique is reported, not silently trusted")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--verify", "Boundedly wait after persistence for the existing receipts: the gateway receipt for a person, or the wake result and any claim already present for a seat, plus the gateway receipt when the gateway may also post to that seat (a registered person with a pane; eligible to post, not guaranteed). Never retries the create or the wake, and never claims the message was read")
@@ -913,6 +914,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       humanQuestionsFile?: string;
       summary?: string;
       evidenceRef?: string;
+      dedupeKey?: string;
       host?: string;
       nudge?: boolean;
       verify?: boolean;
@@ -1053,6 +1055,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           humanQuestions,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
+          ...(opts.dedupeKey !== undefined ? { dedupeKey: opts.dedupeKey } : {}),
           priority: opts.priority,
           tier: opts.tier,
           tags,
@@ -1070,6 +1073,17 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
+          }
+          // A daemon that predates --dedupe-key drops the field and answers as if it had been kept, so the key is
+          // trusted only when the answer echoes it. The row, if any, was already written: say so, and fail.
+          if (opts.dedupeKey !== undefined && status < 400) {
+            const wanted = opts.dedupeKey.trim();
+            if (created?.dedupeKey !== wanted) {
+              console.error(`Error: this daemon did not confirm dedupe key '${wanted}', so it cannot keep it unique. ${typeof created?.qitemId === "string" ? `Row ${created.qitemId} WAS created without dedupe; close it if it duplicates another.` : "The create may have written a row without dedupe."}`);
+              process.exitCode = 1;
+            } else if (created.deduped === true) {
+              console.error(`Deduplicated: open row ${String(created.qitemId)} already holds dedupe key '${wanted}' at ${hostResolved.destination}. No new row was created; the request ID ${qitemId} was not used.`);
+            }
           }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
           const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];

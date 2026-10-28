@@ -214,6 +214,12 @@ export function queueRoutes(): Hono {
         // caller id-reuse (a bug, not an idempotent retry) — surface as a
         // conflict, never overwrite.
         : err.code === "qitem_id_reuse" ? 409
+        // D4222: dedupe_key. A key held by another source, a reopen that would be a second open holder, and a
+        // database that cannot keep the key unique are conflicts; a malformed key is the caller's.
+        : err.code === "dedupe_key_conflict" ? 409
+        : err.code === "dedupe_key_open_elsewhere" ? 409
+        : err.code === "dedupe_unsupported" ? 409
+        : err.code === "invalid_dedupe_key" ? 400
         // OPR.0.4.6.MH3 FR-4 (C2): a cross-host source-close re-drive naming a
         // DIFFERENT closure_target than the recorded one — someone else closed
         // the source meanwhile; surfaced, never overwritten.
@@ -557,6 +563,7 @@ export function queueRoutes(): Hono {
       humanQuestions?: HumanQuestion[] | null; // shape validated by the repository (invalid_human_questions)
       summary?: string | null;
       evidenceRef?: string | null;
+      dedupeKey?: string | null;
       nudge?: boolean;
       // OPR.0.4.6.MH3 FR-1: the out-of-band host envelope (BR-1 — the
       // session string stays member@rig; the host is NEVER in-string).
@@ -629,11 +636,13 @@ export function queueRoutes(): Hono {
         humanQuestions: body.humanQuestions,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        dedupeKey: body.dedupeKey,
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
-      return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, 201);
+      // A create that found its dedupeKey held answers 200 with the open row; a new row is 201.
+      return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, item.deduped ? 200 : 201);
     } catch (err) {
       return errorResponse(c, err);
     }
