@@ -58,6 +58,7 @@ import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
 import { ProviderAccountReadingsStore } from "./domain/provider/provider-account-readings.js";
 import { claudeAuthStatusReader } from "./domain/provider/claude-auth-status-reader.js";
+import { quotaCollectorFromEnv } from "./domain/provider/quota-collector-usage.js";
 import { ClaudeUsageWindows, latestClaudeWindowSamples } from "./domain/provider/claude-usage-windows.js";
 import { prepareCodexSeatFolder, prepareCodexTeamWorkspace } from "./domain/codex-team-workspace.js";
 import { resolveCodexGitAddDirs } from "./domain/codex-git-add-dirs.js";
@@ -1440,6 +1441,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
         enabled: () => new ContextPackSettingsStore().resolveOne("provider.usage_windows").value === true,
         windows: new CodexUsageWindows({ read: codexUsageReader({ launchPath: process.env.PATH, home: daemonHome, codexHome }),
           store: new ProviderAccountReadingsStore(db) }),
+        // P4: the subscription rails the quota collector meters, from its file (OPENRIG_PROVIDER_QUOTA_FILE) and the allowed-rails
+        // file (OPENRIG_PROVIDER_RAILS_FILE); undefined, so nothing changes, when neither is set.
+        collector: quotaCollectorFromEnv(process.env),
         claudeTokens: new ClaudeTokenUsage({ read: claudeTokenUsageReader({ launchPath: process.env.PATH }),
           store: new ProviderAccountReadingsStore<ClaudeTokenIdentity>(db, "claude") }),
         claude: new ClaudeUsageWindows({

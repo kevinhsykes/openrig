@@ -1,0 +1,77 @@
+{
+  "schema_version": "provider-availability.v1",
+  "updated_at": "2026-10-27T21:42:43Z",
+  "providers": {
+    "zai": {
+      "aliases": ["glm", "z.ai"],
+      "models": {},
+      "quota_observation": {
+        "account_fingerprint": "<redacted>", "estimated": false, "observed_at": "2026-10-27T21:42:10.373723+00:00",
+        "pool_id": "zai-vendor", "raw_hash": "<redacted>", "remaining_fraction": 0.79,
+        "reset_at": "2026-10-28T00:49:11.417000+00:00", "reset_epoch": "2026-10-28T00:49:11.417000+00:00",
+        "source": "z.ai-live", "window_id": "5h"
+      },
+      "quota_windows": [
+        { "account_fingerprint": "<redacted>", "applies_to": ["web_search", "web_reader", "zread"], "estimated": false,
+          "observed_at": "2026-10-27T21:42:10.373723+00:00", "pool_id": "zai-vendor", "raw_hash": "<redacted>", "remaining_fraction": 0.99,
+          "reset_at": "2026-11-20T05:34:58.983000+00:00", "reset_epoch": "2026-11-20T05:34:58.983000+00:00",
+          "scope": "feature", "source": "z.ai-live", "window_id": "mcp-tools" },
+        { "account_fingerprint": "<redacted>", "estimated": false, "observed_at": "2026-10-27T21:42:10.373723+00:00",
+          "pool_id": "zai-vendor", "raw_hash": "<redacted>", "remaining_fraction": 0.79,
+          "reset_at": "2026-10-28T00:49:11.417000+00:00", "reset_epoch": "2026-10-28T00:49:11.417000+00:00",
+          "scope": "provider", "source": "z.ai-live", "window_id": "5h" },
+        { "account_fingerprint": "<redacted>", "estimated": false, "observed_at": "2026-10-27T21:42:10.373723+00:00",
+          "pool_id": "zai-vendor", "raw_hash": "<redacted>", "remaining_fraction": 0.8,
+          "reset_at": "2026-11-03T13:44:09.999000+00:00", "reset_epoch": "2026-11-03T13:44:09.999000+00:00",
+          "scope": "provider", "source": "z.ai-live", "window_id": "weekly" }
+      ],
+      "record": { "expected_reset_at": null, "generation": 0, "quota_window": { "duration_seconds": 18000, "id": "zai-coding-plan-5h", "kind": "rolling" },
+        "reason": "operator note elided", "set_at": "2026-07-25T21:00:00Z", "set_by": "kevin", "state": "AVAILABLE" }
+    },
+    "ollama-cloud": {
+      "aliases": [], "models": {},
+      "quota_observation": null,
+      "quota_windows": [
+        { "account_fingerprint": null, "observed_at": "2026-10-27T21:40:00+00:00", "remaining_fraction": 0.5, "reset_at": "2026-10-27T23:40:00+00:00", "scope": "provider", "source": "ollama-cloud-live", "window_id": "session" },
+        { "account_fingerprint": null, "observed_at": "2026-10-27T21:40:00+00:00", "remaining_fraction": 0.9, "reset_at": "2026-11-02T00:00:00+00:00", "scope": "provider", "source": "ollama-cloud-live", "window_id": "weekly" }
+      ],
+      "record": { "state": "AVAILABLE", "set_by": "kevin", "expected_reset_at": null }
+    },
+    "xai": {
+      "aliases": ["grok"], "models": {},
+      "quota_observation": null,
+      "quota_windows": [
+        { "account_fingerprint": null, "observed_at": "2026-10-27T21:30:00+00:00", "remaining_fraction": 0.0, "reset_at": "2026-11-03T00:00:00+00:00", "scope": "provider", "source": "grok-cli-unified-jsonl", "window_id": "weekly" }
+      ],
+      "record": { "state": "EXHAUSTED", "set_by": "hard-fail", "set_at": "2026-10-27T05:14:59Z", "expected_reset_at": "2026-10-27T06:14:59Z" }
+    },
+    "muse-code": {
+      "aliases": [], "models": {}, "quota_observation": null,
+      "quota_windows": [
+        { "account_fingerprint": null, "observed_at": "2026-10-27T21:41:00+00:00", "remaining_fraction": 0.6, "reset_at": null, "scope": "provider", "source": "muse-msp-usage-read", "window_id": "monthly" }
+      ],
+      "record": { "state": "AVAILABLE", "set_by": "muse_usage" }
+    },
+    "mistralvibe": {
+      "aliases": [], "models": {}, "quota_observation": null,
+      "quota_windows": [
+        { "account_fingerprint": null, "observed_at": "2026-10-26T12:00:00+00:00", "remaining_fraction": 0.7, "reset_at": "2026-11-26T00:00:00+00:00", "scope": "provider", "source": "last-known:mistralvibe (probe failed)", "window_id": "vibe-code" }
+      ],
+      "record": { "state": "AVAILABLE" }
+    },
+    "openai": {
+      "aliases": [], "models": {}, "quota_observation": null,
+      "quota_windows": [
+        { "account_fingerprint": "<redacted>", "observed_at": "2026-10-27T21:41:00+00:00", "remaining_fraction": 0.4, "reset_at": "2026-10-28T02:00:00+00:00", "scope": "provider", "source": "codex-native-rpc", "window_id": "5h" }
+      ],
+      "record": { "state": "AVAILABLE" }
+    },
+    "qwen": { "aliases": [], "models": {}, "quota_observation": null, "quota_windows": null, "record": { "state": "DISABLED_BY_KEVIN", "set_by": "kevin" } },
+    "from-account-store": { "aliases": [], "models": {}, "quota_observation": null, "quota_windows": null },
+    "mystery-vendor": {
+      "aliases": [], "models": {}, "quota_observation": null,
+      "quota_windows": [ { "account_fingerprint": null, "observed_at": "2026-10-27T21:41:00+00:00", "remaining_fraction": 0.3, "reset_at": null, "scope": "provider", "source": "mystery-live", "window_id": "daily" } ],
+      "record": { "state": "AVAILABLE" }
+    }
+  }
+}

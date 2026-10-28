@@ -30,6 +30,43 @@ export function isKnownProviderKind(x: unknown): x is KnownProviderKind {
   return typeof x === "string" && (KNOWN_PROVIDER_KINDS as readonly string[]).includes(x);
 }
 
+// ——— Rails registered at load (P4) ———
+// The built-in pair above has native readers. A subscription rail the quota collector meters (zai, minimax, ...) registers its id at load,
+// from the allowed-rails file the fleet exports (provider-rails.ts); the fork ships no rail list. The daemon's validators all ask
+// `knownProviderKinds()`, the live list: built-ins, then registered rails. Anything that needs a native reader or a remote refresh deadline
+// keeps asking `isKnownProviderKind`, which stays the built-in pair only: a registered rail has neither. The CLI keeps no list of its own:
+// it passes `--provider` to the daemon, which refuses an unknown kind with this list.
+const REGISTERED_RAIL_ID = /^[a-z][a-z0-9_-]{0,63}$/;
+const registeredProviderKinds = new Set<string>();
+
+/** Whether `x` can name a rail: the shape of a rail id (lower-case letters, digits, `_` and `-`, starting with a letter). */
+export function isProviderRailId(x: unknown): x is string {
+  return typeof x === "string" && REGISTERED_RAIL_ID.test(x);
+}
+
+/** Registers rail ids at load. Idempotent; a built-in kind is already known and is not added; an id that isn't a rail id throws. */
+export function registerProviderKinds(kinds: Iterable<string>): void {
+  const incoming = [...kinds];
+  for (const kind of incoming) if (!isProviderRailId(kind)) throw new Error(`not a rail id: ${JSON.stringify(kind)}`);
+  for (const kind of incoming) if (!isKnownProviderKind(kind)) registeredProviderKinds.add(kind);
+}
+
+/** The live list of kinds this daemon knows: the built-in pair, then the registered rails in registration order. Every daemon validator
+ *  and every "known: ..." message reads this. NOT a statement that a native reader exists for each. */
+export function knownProviderKinds(): string[] {
+  return [...KNOWN_PROVIDER_KINDS, ...registeredProviderKinds];
+}
+
+/** True for a kind in the live list. */
+export function isRegisteredProviderKind(x: unknown): x is string {
+  return typeof x === "string" && knownProviderKinds().includes(x);
+}
+
+/** Forgets every registered rail. For tests: the registry is process-wide. */
+export function resetRegisteredProviderKinds(): void {
+  registeredProviderKinds.clear();
+}
+
 export type AccountAuthState = "active" | "needs_reauth" | "unknown";
 
 /** accounts[] — one row per known provider account. */
@@ -209,6 +246,29 @@ export interface FourBlockReadModel {
   /** Slice 01 — each live seat's CONFIGURED account and its source, kept apart from observed allowances
    *  (never linked to a usage row). ADDITIVE and present only while `provider.usage_windows` is on. */
   seatAccounts?: SeatConfiguredAccount[];
+  /** P4 — what the quota-collector file feed read, ADDITIVE: present only while `provider.usage_windows` is on and the feed is configured. */
+  quotaCollector?: QuotaCollectorSummary;
+}
+
+/** What the last read of the quota-collector file saw: what it served, and what it set aside, counted and named (never silently dropped). */
+export interface QuotaCollectorSummary {
+  /** `unavailable`: no read has succeeded (the reason says why: not configured, missing, unreadable, malformed). `not_read`: configured, not yet read. */
+  state: "ok" | "unavailable" | "not_read";
+  reason?: string;
+  /** The file's own `updated_at`, verbatim. */
+  fileUpdatedAt: string | null;
+  /** When this summary's read ran. */
+  readAt: string | null;
+  /** The rails (allowed-rails file) served. */
+  rails: string[];
+  /** File provider keys that are not in the allowed-rails file, skipped. `count` is their number. */
+  unrecognizedRails: { count: number; keys: string[] };
+  /** Allowed rails with no usable window in the file (no row, or no window): shown unavailable, not dropped. */
+  railsWithoutWindows: string[];
+  /** Allowed rails with a native reader (codex, claude): their rows come from it, not from this file. */
+  nativeRailsSkipped: string[];
+  /** Windows set aside as unusable (no id, no observation time, a repeated id), named, at most the first 20. */
+  skippedWindows: { count: number; items: Array<{ rail: string; window: string | null; reason: string }> };
 }
 
 /** Slice 01 — where a seat's account configuration comes from. A registry row is metadata: it doesn't prove
@@ -322,12 +382,35 @@ export interface UsageRefreshOutcome {
   detail?: string;
 }
 
+/** The text of a window whose file entry states no source: the absence, said as such, never a made-up producer. */
+export const COLLECTOR_SOURCE_NOT_STATED = "(source not stated in the file)";
+
+/**
+ * What a quota-collector reading is a reading OF: one window of one rail, as the fleet's quota collector wrote it to its availability
+ * file. It names no account: those windows carry no proof of which account spent them (the file's account fingerprint is never carried
+ * here), so a row with this identity is never linked to an account or to another host's row (BR-4).
+ */
+export interface CollectorQuotaIdentity {
+  /** The file's own provider key for the rail: the availability STORE's spelling, which can differ from the rail id. */
+  provider: string;
+  /** The rail id, as the allowed-rails export spells it; also the row's `provider`. */
+  rail: string;
+  window: string;
+  /** The file's own per-window `source` string, verbatim: it names who really wrote this window (another writer's rows, or a carried-over
+   *  reading, sit in the same file). Never relabeled; `COLLECTOR_SOURCE_NOT_STATED` when the window carries none. */
+  source: string;
+  /** The file's availability record state for the rail, verbatim (AVAILABLE, EXHAUSTED, DISABLED_BY_KEVIN, ...); null when absent. */
+  recordState: string | null;
+  /** A window the file marked unknown (or whose remaining fraction wasn't a number in 0..1): why. Its used percent is null, never 0. */
+  unknown: { kind: string; reason: string | null } | null;
+}
+
 export interface ProviderUsageAllowance {
   probe?: ClaudeTokenProbe;
   provider: ProviderKind;
   /** Null only for the explicit row of a source never read since the daemon started. */
-  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | ClaudeTokenIdentity | null;
-  source: { kind: "codex_app_server" | "claude_statusline_samples" | "claude_token_probe"; host: "local" };
+  identity: UsageAllowanceIdentity | ClaudeUsageIdentity | ClaudeTokenIdentity | CollectorQuotaIdentity | null;
+  source: { kind: "codex_app_server" | "claude_statusline_samples" | "claude_token_probe" | "quota_collector_file"; host: "local" };
   observedAt: string | null;
   /** Seat links are not observed by this read. */
   seats: "unknown";

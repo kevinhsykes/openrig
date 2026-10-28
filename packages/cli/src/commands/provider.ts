@@ -2,7 +2,6 @@ import fs from "node:fs";
 import { Command } from "commander";
 import { DaemonClient, DaemonTimeoutError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
-import { KNOWN_PROVIDER_KINDS_LABEL, isKnownProviderKind } from "@openrig/daemon/provider-types";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -57,6 +56,8 @@ function printClaude(claude: { label: string; tokenFile: string | null; checked:
 }
 
 export function providerCommand(depsOverride?: StatusDeps): Command {
+  // --provider is passed to the daemon as given: this process keeps no list of known kinds (it can't see the rails a daemon registered),
+  // and the daemon refuses an unknown kind with its own live list.
   const cmd = new Command("provider").description(
     "Provider accounts and usage signals, and moving one Codex seat to another login saved in its Codex home",
   );
@@ -158,6 +159,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     // freshness print side by side, each window with its own observation time; a failed refresh
     // prints beside the kept reading.
     if (Array.isArray(m["usage"])) renderUsage(m["usage"] as Array<Record<string, unknown>>);
+    if (m["quotaCollector"] && typeof m["quotaCollector"] === "object") renderQuotaCollector(m["quotaCollector"] as Record<string, unknown>);
     if (Array.isArray(m["seatAccounts"])) renderSeatAccounts(m["seatAccounts"] as Array<Record<string, unknown>>);
   }
 
@@ -200,6 +202,34 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     const mins = w["durationMins"];
     const label = mins === 300 ? "5h" : mins === 10080 ? "weekly" : typeof mins === "number" ? `${mins} min` : null;
     return label ? `${label} (${w["window"]})` : String(w["window"]);
+  }
+
+  /** A quota-collector row's identity: the rail, who really wrote the window (verbatim), and that it names no account. */
+  function collectorLabel(id: Record<string, unknown>): string {
+    const unknown = id["unknown"] as Record<string, unknown> | null | undefined;
+    return [
+      `rail ${id["rail"]}${id["provider"] !== id["rail"] ? ` (file key ${id["provider"]})` : ""}`,
+      `source ${id["source"]} (the file's own string), read from the fleet quota collector file`,
+      "advisory only: proves rail-level use, not which account spent it",
+      id["recordState"] && id["recordState"] !== "AVAILABLE" ? `file state ${id["recordState"]}` : null,
+      unknown ? `unknown (${unknown["kind"]}${unknown["reason"] ? `: ${unknown["reason"]}` : ""})` : null,
+    ].filter((x) => x !== null).join(" · ");
+  }
+
+  /** What the last read of the quota-collector file saw: what it served and what it set aside, counted and named. */
+  function renderQuotaCollector(q: Record<string, unknown>): void {
+    const rails = (q["rails"] as string[] | undefined) ?? [];
+    console.log(`QUOTA COLLECTOR FILE: ${q["state"]}${q["reason"] ? ` (${q["reason"]})` : ""}${q["fileUpdatedAt"] ? ` · file updated_at ${q["fileUpdatedAt"]}` : ""}${q["readAt"] ? ` · read ${q["readAt"]}` : ""} · ${rails.length} rail${rails.length === 1 ? "" : "s"} served`);
+    const unrecognized = q["unrecognizedRails"] as { count: number; keys: string[] } | undefined;
+    if (unrecognized && unrecognized.count > 0) console.log(`  unrecognized_rails: ${unrecognized.count} skipped, not in the allowed-rails file: ${unrecognized.keys.join(", ")}`);
+    const without = (q["railsWithoutWindows"] as string[] | undefined) ?? [];
+    if (without.length > 0) console.log(`  rails with no usable window in the file (shown unavailable): ${without.join(", ")}`);
+    const native = (q["nativeRailsSkipped"] as string[] | undefined) ?? [];
+    if (native.length > 0) console.log(`  rails with a native reader, not read from this file: ${native.join(", ")}`);
+    const skipped = q["skippedWindows"] as { count: number; items: Array<Record<string, unknown>> } | undefined;
+    if (skipped && skipped.count > 0) {
+      console.log(`  windows set aside: ${skipped.count}: ${skipped.items.map((i) => `${i["rail"]}${i["window"] ? `/${i["window"]}` : ""} (${i["reason"]})`).join("; ")}${skipped.count > skipped.items.length ? "; ..." : ""}`);
+    }
   }
 
   function identityLabel(id: Record<string, unknown>): string {
@@ -248,8 +278,9 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       return;
     }
     // Identity first; for Codex the email is a label.
-    const labels = [identityLabel(id), `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${r["seats"] ?? "unknown"}`]
-      .filter((x) => x !== null && x !== undefined);
+    const labels = (r["source"] as Record<string, unknown> | undefined)?.["kind"] === "quota_collector_file" ? [collectorLabel(id)]
+      : [identityLabel(id), `bucket ${id["limitId"]}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${r["seats"] ?? "unknown"}`]
+        .filter((x) => x !== null && x !== undefined);
     // Not from the latest read: say only that. A later read proves no other account (an unresolved read
     // may be this same login), so the label names the read, not an account.
     const earlier = r["latestFromSource"] ? ""
@@ -409,17 +440,12 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
     .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
-    .option("--provider <p>", `With --refresh, read only this provider (known: ${KNOWN_PROVIDER_KINDS_LABEL})`)
+    .option("--provider <p>", "With --refresh, read only this provider (known kinds: see rig provider status)")
     .option("--claude-token-file <path>", "With --refresh --provider claude, probe this absolute token-file reference on the selected daemon (one model turn; no token value in argv)")
     .option("--credential-label <label>", "Operator label for the selected Claude token file; not provider-observed account identity")
     .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
     .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string }) => {
-      if (opts.provider !== undefined && !isKnownProviderKind(opts.provider)) {
-        console.error(`--provider must be a known provider kind (known: ${KNOWN_PROVIDER_KINDS_LABEL}; got ${opts.provider})`);
-        process.exitCode = 1;
-        return;
-      }
       const tokenSelected = opts.claudeTokenFile !== undefined || opts.credentialLabel !== undefined;
       if (tokenSelected && (!opts.claudeTokenFile || !opts.credentialLabel || !opts.refresh || opts.provider !== "claude" || opts.allHosts || opts.hosts !== undefined)) {
         console.error("A token probe requires --refresh --provider claude --claude-token-file <absolute path> --credential-label <label>, on one daemon (no --all-hosts/--hosts).");
@@ -494,7 +520,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       .command(block)
       .description(`The ${block} block of the provider read model`)
       .option("--json", "Output as parseable JSON")
-      .option("--provider <p>", `Filter by provider (known: ${KNOWN_PROVIDER_KINDS_LABEL})`)
+      .option("--provider <p>", "Filter by provider (known kinds: see rig provider status)")
       .option("--account <a>", "Filter by account ref")
       .action(async (opts: { json?: boolean; provider?: string; account?: string }) => {
         const qs = new URLSearchParams();

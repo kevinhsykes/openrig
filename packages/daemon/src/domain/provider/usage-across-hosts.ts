@@ -16,12 +16,14 @@ import type { HostEntry, HostRegistryLoadResult, HttpHostEntry } from "../hosts/
 import { remoteJsonRequest, resolveBearer, type RemoteJsonResult } from "../hosts/remote-daemon-http.js";
 import { claudeUsageIdentityKey } from "./claude-usage-windows.js";
 import { codexUsageIdentityKey } from "./codex-usage-windows.js";
+import { collectorUsageIdentityKey } from "./quota-collector-usage.js";
 import type {
   ClaudeUsageIdentity,
   FourBlockReadModel,
   ProviderKind,
   ProviderUsageAllowance,
   SeatConfiguredAccount,
+  CollectorQuotaIdentity,
   UsageAllowanceIdentity,
 } from "./provider-types.js";
 import { isKnownProviderKind, KNOWN_PROVIDER_KINDS_LABEL, type KnownProviderKind } from "./provider-types.js";
@@ -114,9 +116,12 @@ export interface UsageAcrossHosts extends AggregatedPayload<UsageAllowanceGroup>
 /** The key a host keyed this row by (the same functions the hosts use); null when unresolved or never read. */
 export function allowanceKey(row: ProviderUsageAllowance): string | null {
   if (!row.identity || row.source.kind === "claude_token_probe") return null;
-  return row.provider === "codex"
-    ? codexUsageIdentityKey(row.identity as UsageAllowanceIdentity)
-    : claudeUsageIdentityKey(row.identity as ClaudeUsageIdentity);
+  // A quota-collector rail has its own key: it must never be read through the Claude key function below.
+  if (row.source.kind === "quota_collector_file") return collectorUsageIdentityKey(row.identity as CollectorQuotaIdentity);
+  if (row.provider === "codex") return codexUsageIdentityKey(row.identity as UsageAllowanceIdentity);
+  if (row.provider === "claude") return claudeUsageIdentityKey(row.identity as ClaudeUsageIdentity);
+  // Any other kind has no key function here: its identity is unresolved, never read as a Claude one.
+  return null;
 }
 
 /**
@@ -127,7 +132,10 @@ export function allowanceKey(row: ProviderUsageAllowance): string | null {
  * missing (or empty) email is no evidence of the same login, so an observation without one links to nothing on
  * another host.
  */
-export function crossHostLinkKey(row: ProviderUsageAllowance, key: string, hostId: string): string {
+export function crossHostLinkKey(row: ProviderUsageAllowance, key: string, hostId: string): string | null {
+  // A collector reading proves rail-level use, not an account: the same rail and window on two hosts may be two accounts, so a
+  // collector observation has no link key and links to nothing on another host (BR-4).
+  if (row.source.kind === "quota_collector_file") return null;
   if (row.provider !== "codex") return key;
   const email = (row.identity as UsageAllowanceIdentity).email;
   return email ? `${key}\u0000email:${email}` : `${key}\u0000host:${hostId}`;
@@ -169,6 +177,12 @@ export function groupUsageAcrossHosts(observations: UsageObservation[]): UsageAl
       continue;
     }
     const link = crossHostLinkKey(o.row, key, o.hostId);
+    if (link === null) {
+      // No link key: this observation stays its own row, keeping the key it was read under.
+      unlinked.push({ provider: o.row.provider, key, linkage: "unknown", observations: [o], notes: [
+        `${key} is a reading from the host's own quota collector file: it proves rail-level use, not which account spent it, so it is not linked to other hosts' readings` ] });
+      continue;
+    }
     const group = linked.get(link) ?? { key, observations: [] };
     group.observations.push(o);
     linked.set(link, group);
