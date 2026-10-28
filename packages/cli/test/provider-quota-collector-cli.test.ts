@@ -51,6 +51,16 @@ const MODEL = {
 };
 
 describe("rig provider status shows collector-fed rails", () => {
+  it("keeps control sequences in JSON evidence but removes them from terminal output", async () => {
+    const model = structuredClone(MODEL);
+    model.quotaCollector.unrecognizedRails.keys = ["bad\u001b]52;c;payload\u0007"];
+    model.usage[0]!.identity = { ...model.usage[0]!.identity!, source: "source\u009b31m\u001b[2J" };
+    const human = await run(["status"], model);
+    expect(human.out).not.toMatch(/[\x00-\x09\x0b-\x1f\x7f-\x9f]/);
+    const json = await run(["status", "--json"], model);
+    expect(JSON.parse(json.out)).toEqual(model);
+    expect(json.out).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+  });
   it("names each rail window with its rail, the file's own source string and that it is advisory, and shows no Codex-shaped fields", async () => {
     const { out, exitCode } = await run(["status"], MODEL);
     expect(exitCode).toBeUndefined();

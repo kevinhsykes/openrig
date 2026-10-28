@@ -21,6 +21,7 @@ import { UsageWindows, type UsageReading, type UsageRefreshResult } from "./usag
 export const QUOTA_FILE_SCHEMA = "provider-availability.v1";
 /** A file larger than this is refused rather than read into memory. */
 export const QUOTA_FILE_MAX_BYTES = 8 * 1024 * 1024;
+export const QUOTA_READ_TIMEOUT_MS = 2_000;
 /** `rig provider status` re-reads the file at most this often (a local file read, not a probe). */
 export const QUOTA_READ_MIN_INTERVAL_MS = 30_000;
 const SKIPPED_NAMED = 20;
@@ -163,11 +164,34 @@ export class QuotaCollectorUsage {
     const fail = (reason: string, detail: string): FileState => ({ ok: false, at, reason, detail });
     let body: string;
     try {
-      const stat = await fs.promises.stat(this.opts.file);
-      if (stat.size > QUOTA_FILE_MAX_BYTES) return fail("file_too_large", `the collector file is larger than ${QUOTA_FILE_MAX_BYTES} bytes`);
-      body = await fs.promises.readFile(this.opts.file, "utf8");
+      const controller = new AbortController();
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const read = async (): Promise<string> => {
+        const file = await fs.promises.open(this.opts.file, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+        try {
+          if (controller.signal.aborted) throw Object.assign(new Error(), { code: "ETIMEDOUT" });
+          const stat = await file.stat();
+          if (!stat.isFile()) throw Object.assign(new Error(), { code: "ENOTFILE" });
+          if (stat.size > QUOTA_FILE_MAX_BYTES) throw Object.assign(new Error(), { code: "EFBIG" });
+          const chunks: Buffer[] = [];
+          let size = 0;
+          for await (const chunk of file.createReadStream({ highWaterMark: 64 * 1024, signal: controller.signal, autoClose: false })) {
+            size += chunk.length;
+            if (size > QUOTA_FILE_MAX_BYTES) throw Object.assign(new Error(), { code: "EFBIG" });
+            chunks.push(chunk as Buffer);
+          }
+          return Buffer.concat(chunks).toString("utf8");
+        } finally { await file.close(); }
+      };
+      try {
+        body = await Promise.race([read(), new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => { controller.abort(); reject(Object.assign(new Error(), { code: "ETIMEDOUT" })); }, QUOTA_READ_TIMEOUT_MS);
+        })]);
+      } finally { if (timer) clearTimeout(timer); }
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code;
+      if (code === "EFBIG") return fail("file_too_large", `the collector file is larger than ${QUOTA_FILE_MAX_BYTES} bytes`);
+      if (code === "ETIMEDOUT" || code === "ABORT_ERR") return fail("file_read_timeout", "the collector file read exceeded its deadline");
       return code === "ENOENT" ? fail("file_missing", "the collector file doesn't exist at the configured path") : fail("file_unreadable", `the collector file can't be read (${code ?? "error"})`);
     }
     let json: unknown;

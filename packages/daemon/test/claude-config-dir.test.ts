@@ -34,6 +34,15 @@ describe("parseClaudeAccounts", () => {
     const read = parseClaudeAccounts({ accounts: { a: { dir: "/same" }, b: { dir: "/same/" } } });
     expect(read).toEqual({ ok: false, reason: expect.stringContaining('account "b" repeats the config dir /same') });
   });
+
+  it("refuses label collisions and label/key collisions in either order", () => {
+    for (const accounts of [
+      { a: { dir: "/a", label: "shared" }, b: { dir: "/b", label: "shared" } },
+      { a: { dir: "/a", label: "b" }, b: { dir: "/b" } },
+      { b: { dir: "/b" }, a: { dir: "/a", label: "b" } },
+    ]) expect(parseClaudeAccounts({ accounts }).ok).toBe(false);
+    expect(parseClaudeAccounts({ accounts: { a: { dir: "/a", label: "a" } } }).ok).toBe(true);
+  });
 });
 
 describe("readClaudeAccountsFile / claudeConfigDirProblem / claudeConfigDirPresent", () => {

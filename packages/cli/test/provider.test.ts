@@ -283,7 +283,7 @@ describe("rig provider switch|precheck --config-dir moves a Claude seat to anoth
   function deps(onPost: (path: string, body: Record<string, unknown>) => unknown = () => ok, onGet?: (path: string) => unknown): StatusDeps {
     return { ...runningDeps(1), clientFactory: () => ({
       post: async (p: string, body: Record<string, unknown>) => onPost(p, body),
-      get: async (p: string) => onGet?.(p) ?? { status: 200, data: { safe: true } },
+      get: async (p: string) => onGet?.(p) ?? { status: 200, data: p.startsWith("/api/seat/status/") ? { runtime: "claude-code" } : { safe: true } },
     }) as never };
   }
   let dir: string;
@@ -329,6 +329,28 @@ describe("rig provider switch|precheck --config-dir moves a Claude seat to anoth
         { seat: "s1", toAccount: "pro", configDir: "/home/u/.claude-pro", forceUnsafe: false },
         { seat: "s1", toAccount: "cdx-b", forceUnsafe: false },
       ]);
+    } finally { restore(); }
+  });
+
+  it("a Codex saved login keeps its name even when a Claude account uses the same label", async () => {
+    try {
+      process.env.OPENRIG_CLAUDE_ACCOUNTS_FILE = accountsFile();
+      const posted: Array<Record<string, unknown>> = [];
+      const d = deps((_p, body) => { posted.push(body); return ok; }, () => ({ status: 200, data: { runtime: "codex" } }));
+      await run(["switch", "--seat", "codex@rig", "--to-account", "pro"], d);
+      expect(posted).toEqual([{ seat: "codex@rig", toAccount: "pro", forceUnsafe: false }]);
+    } finally { restore(); }
+  });
+
+  it("a missing runtime refuses an automatic Claude label without posting a switch", async () => {
+    try {
+      process.env.OPENRIG_CLAUDE_ACCOUNTS_FILE = accountsFile();
+      let posts = 0;
+      const result = await run(["switch", "--seat", "unknown@rig", "--to-account", "pro"],
+        deps(() => { posts++; return ok; }, () => ({ status: 200, data: {} })));
+      expect(result.exitCode).toBe(1);
+      expect(posts).toBe(0);
+      expect(result.logs.join("\n")).toContain("seat's runtime");
     } finally { restore(); }
   });
 

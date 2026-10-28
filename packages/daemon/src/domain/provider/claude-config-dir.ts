@@ -34,6 +34,7 @@ export function parseClaudeAccounts(json: unknown): ClaudeAccountsRead {
   if (!isRecord(json) || !isRecord(json.accounts)) return { ok: false, reason: 'the accounts file has no "accounts" mapping' };
   const accounts: ClaudeAccount[] = [];
   const seenDirs = new Set<string>();
+  const names = new Map<string, string>();
   for (const [key, entry] of Object.entries(json.accounts)) {
     if (!isRecord(entry)) return { ok: false, reason: `account "${key}" isn't a mapping` };
     const problem = claudeConfigDirProblem(entry.dir);
@@ -42,7 +43,12 @@ export function parseClaudeAccounts(json: unknown): ClaudeAccountsRead {
     // Two labels on one home would make "one account per home" unprovable.
     if (seenDirs.has(dir)) return { ok: false, reason: `account "${key}" repeats the config dir ${dir}` };
     seenDirs.add(dir);
-    accounts.push({ key, label: typeof entry.label === "string" && entry.label !== "" ? entry.label : key, dir });
+    const label = typeof entry.label === "string" && entry.label !== "" ? entry.label : key;
+    for (const name of new Set([key, label])) {
+      if (names.has(name)) return { ok: false, reason: `account "${key}" repeats an account name` };
+      names.set(name, key);
+    }
+    accounts.push({ key, label, dir });
   }
   return accounts.length > 0 ? { ok: true, accounts } : { ok: false, reason: "the accounts file declares no accounts" };
 }

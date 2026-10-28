@@ -40,6 +40,9 @@ function printSeat(seat: SeatView): void {
   }
 }
 
+const terminalText = (value: string): string => value.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
+const jsonOutput = (value: unknown): string => JSON.stringify(value).replace(/[\x7f-\x9f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+
 type AccountOpts = { toAccount?: string; tokenFile?: string; storedLogin?: boolean; configDir?: string; accountsFile?: string };
 
 /** Names the file that declares the Claude accounts (config-dir homes); `--accounts-file` wins over this variable. */
@@ -67,6 +70,13 @@ function targetAccount(opts: AccountOpts, env: NodeJS.ProcessEnv = process.env):
     if (match) return { toAccount: match.key, configDir: match.dir };
   }
   return { toAccount: opts.toAccount, ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}) };
+}
+
+async function targetForSeat(opts: AccountOpts & { seat: string }, target: Target, client: DaemonClient): Promise<Target | string> {
+  if (!target.configDir || opts.configDir !== undefined) return target;
+  const seat = await client.get<{ runtime?: string }>(`/api/seat/status/${encodeURIComponent(opts.seat)}`);
+  if (seat.status >= 400 || typeof seat.data?.runtime !== "string") return "Cannot resolve an account label without the seat's runtime. Check rig seat status first.";
+  return seat.data.runtime === "claude-code" ? target : { toAccount: opts.toAccount! };
 }
 
 /** What to say when no account was named, or the options couldn't make one. */
@@ -252,16 +262,16 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   /** What the last read of the quota-collector file saw: what it served and what it set aside, counted and named. */
   function renderQuotaCollector(q: Record<string, unknown>): void {
     const rails = (q["rails"] as string[] | undefined) ?? [];
-    console.log(`QUOTA COLLECTOR FILE: ${q["state"]}${q["reason"] ? ` (${q["reason"]})` : ""}${q["fileUpdatedAt"] ? ` · file updated_at ${q["fileUpdatedAt"]}` : ""}${q["readAt"] ? ` · read ${q["readAt"]}` : ""} · ${rails.length} rail${rails.length === 1 ? "" : "s"} served`);
+    console.log(terminalText(`QUOTA COLLECTOR FILE: ${q["state"]}${q["reason"] ? ` (${q["reason"]})` : ""}${q["fileUpdatedAt"] ? ` · file updated_at ${q["fileUpdatedAt"]}` : ""}${q["readAt"] ? ` · read ${q["readAt"]}` : ""} · ${rails.length} rail${rails.length === 1 ? "" : "s"} served`));
     const unrecognized = q["unrecognizedRails"] as { count: number; keys: string[] } | undefined;
-    if (unrecognized && unrecognized.count > 0) console.log(`  unrecognized_rails: ${unrecognized.count} skipped, not in the allowed-rails file: ${unrecognized.keys.join(", ")}`);
+    if (unrecognized && unrecognized.count > 0) console.log(terminalText(`  unrecognized_rails: ${unrecognized.count} skipped, not in the allowed-rails file: ${unrecognized.keys.join(", ")}`));
     const without = (q["railsWithoutWindows"] as string[] | undefined) ?? [];
-    if (without.length > 0) console.log(`  rails with no usable window in the file (shown unavailable): ${without.join(", ")}`);
+    if (without.length > 0) console.log(terminalText(`  rails with no usable window in the file (shown unavailable): ${without.join(", ")}`));
     const native = (q["nativeRailsSkipped"] as string[] | undefined) ?? [];
-    if (native.length > 0) console.log(`  rails with a native reader, not read from this file: ${native.join(", ")}`);
+    if (native.length > 0) console.log(terminalText(`  rails with a native reader, not read from this file: ${native.join(", ")}`));
     const skipped = q["skippedWindows"] as { count: number; items: Array<Record<string, unknown>> } | undefined;
     if (skipped && skipped.count > 0) {
-      console.log(`  windows set aside: ${skipped.count}: ${skipped.items.map((i) => `${i["rail"]}${i["window"] ? `/${i["window"]}` : ""} (${i["reason"]})`).join("; ")}${skipped.count > skipped.items.length ? "; ..." : ""}`);
+      console.log(terminalText(`  windows set aside: ${skipped.count}: ${skipped.items.map((i) => `${i["rail"]}${i["window"] ? `/${i["window"]}` : ""} (${i["reason"]})`).join("; ")}${skipped.count > skipped.items.length ? "; ..." : ""}`));
     }
   }
 
@@ -302,12 +312,12 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
   function renderUsageRow(r: Record<string, unknown>, pad = "  "): void {
     const id = r["identity"] as Record<string, unknown> | null;
     if (!id) {
-      console.log(`${pad}${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`);
+      console.log(terminalText(`${pad}${r["provider"]}  unavailable: ${r["unavailableReason"] ?? "no reading"}`));
       // A row with no identity yet can still carry history (Claude's before its first identity refresh): before sign-in,
       // as on an identified row.
-      for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
+      for (const line of historyLines(r)) console.log(terminalText(`${pad}  ${line}`));
       const signIn = signInLine(r);
-      if (signIn) console.log(`${pad}  ${signIn}`);
+      if (signIn) console.log(terminalText(`${pad}  ${signIn}`));
       return;
     }
     // Identity first; for Codex the email is a label.
@@ -320,39 +330,39 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       : r["retained"] === "before_restart" ? "  [kept from before the daemon restarted; not a current reading]"
       : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"
         : "  [from an earlier read; the latest read didn't match this row]";
-    console.log(`${pad}${r["provider"]}  ${labels.join(" · ")}${earlier}`);
-    if (r["probe"]) console.log(`${pad}  token probe: ${JSON.stringify(r["probe"])}`);
-    if (r["identityNote"]) console.log(`${pad}  ${r["identityNote"]}`);
+    console.log(terminalText(`${pad}${r["provider"]}  ${labels.join(" · ")}${earlier}`));
+    if (r["probe"]) console.log(terminalText(`${pad}  token probe: ${JSON.stringify(r["probe"])}`));
+    if (r["identityNote"]) console.log(terminalText(`${pad}  ${r["identityNote"]}`));
     const unresolved = r["unresolved"] as Record<string, unknown> | undefined;
     if (unresolved) {
       const dropped = Number(unresolved["droppedReads"] ?? 0);
-      console.log(`${pad}  not matched to, merged with or replacing any other row; kept from the ${unresolved["keptReads"]} most recent unresolved reads${dropped > 0 ? ` (${dropped} older dropped)` : ""}`);
+      console.log(terminalText(`${pad}  not matched to, merged with or replacing any other row; kept from the ${unresolved["keptReads"]} most recent unresolved reads${dropped > 0 ? ` (${dropped} older dropped)` : ""}`));
     }
     for (const w of (r["windows"] as Array<Record<string, unknown>>) ?? []) {
       const left = w["remainingPercent"] === null ? "?% left" : `${w["remainingPercent"]}% left`;
       const level = w["levelReason"] ? `${w["level"]} (${w["levelReason"]})` : String(w["level"]);
       const fresh = w["freshnessReason"] ? `${w["freshness"]}: ${w["freshnessReason"]}` : String(w["freshness"]);
       const seat = w["seatSession"] ? ` by seat ${w["seatSession"]}` : "";
-      console.log(`${pad}  ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})${w["status"] ? ` · provider ${w["status"]}` : ""}`);
+      console.log(terminalText(`${pad}  ${windowName(w)}  ${left}  ${level}  resets ${w["resetsAt"] ?? "unknown"}  observed ${w["observedAt"]}${seat} (${fresh})${w["status"] ? ` · provider ${w["status"]}` : ""}`));
       for (const d of (w["disagreeingSeats"] as Array<Record<string, unknown>> | undefined) ?? []) {
-        console.log(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`);
+        console.log(terminalText(`${pad}    seat ${d["seatSession"]} reports ${Math.max(0, 100 - Number(d["usedPercent"]))}% left  resets ${d["resetsAt"] ?? "unknown"}  observed ${d["observedAt"]}`));
       }
       const expect = w["expectation"] as Record<string, unknown> | undefined;
-      if (expect) console.log(`${pad}    expected full since ${expect["expectedFullSince"]}, not yet observed (${expect["note"]})`);
+      if (expect) console.log(terminalText(`${pad}    expected full since ${expect["expectedFullSince"]}, not yet observed (${expect["note"]})`));
     }
-    for (const line of historyLines(r)) console.log(`${pad}  ${line}`);
-    if (r["unavailableReason"]) console.log(`${pad}  ${r["unavailableReason"]}`);
-    if (r["limitEvidence"]) console.log(`${pad}  limit evidence: ${r["limitEvidence"]}`);
+    for (const line of historyLines(r)) console.log(terminalText(`${pad}  ${line}`));
+    if (r["unavailableReason"]) console.log(terminalText(`${pad}  ${r["unavailableReason"]}`));
+    if (r["limitEvidence"]) console.log(terminalText(`${pad}  limit evidence: ${r["limitEvidence"]}`));
     const last = r["lastRefresh"] as Record<string, unknown> | null;
     if (last?.["outcome"] === "failed") {
       // Claude's refresh reads identity only; its windows keep coming from the seats' samples.
-      console.log(r["provider"] === "claude" && (r["source"] as Record<string, unknown> | undefined)?.["kind"] !== "claude_token_probe"
+      console.log(terminalText(r["provider"] === "claude" && (r["source"] as Record<string, unknown> | undefined)?.["kind"] !== "claude_token_probe"
         ? `${pad}  identity refresh failed at ${last["at"]}: ${failureText(last)}; the identity shown is from the last refresh that worked, if any`
-        : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`);
+        : `${pad}  refresh failed at ${last["at"]}: ${failureText(last)}; last reading kept, marked old`));
     }
-    console.log(`${pad}  current availability: ${r["currentAvailability"]}`);
+    console.log(terminalText(`${pad}  current availability: ${r["currentAvailability"]}`));
     const signIn = signInLine(r);
-    if (signIn) console.log(`${pad}  ${signIn}`);
+    if (signIn) console.log(terminalText(`${pad}  ${signIn}`));
   }
 
   // Slice 01 — usage across registered hosts, as the daemon serves it: each host's status and whether it serves usage
@@ -451,7 +461,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     }
     // A host not heard from in time is listed like any host that couldn't be read; only a failed refresh leg sets the exit.
     if (refreshExit > 0) process.exitCode = refreshExit;
-    if (opts.json) console.log(JSON.stringify(view));
+    if (opts.json) console.log(jsonOutput(view));
     else renderAcrossHosts(view);
   }
 
@@ -544,7 +554,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       const res = await client.get<Record<string, unknown>>("/api/provider/status");
       if (handleHttpError(res, "read provider status")) return;
       if (refreshExit > 0) process.exitCode = refreshExit;
-      if (opts.json) console.log(JSON.stringify(res.data));
+      if (opts.json) console.log(jsonOutput(res.data));
       else renderStatusHuman(res.data);
     });
 
@@ -575,20 +585,22 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--accounts-file <path>", `Claude: the file declaring the account config dirs, so --to-account can name one by label (default: $${CLAUDE_ACCOUNTS_FILE_ENV})`)
     .option("--json", "Output as parseable JSON")
     .action(async (opts: AccountOpts & { seat: string; json?: boolean }) => {
-      const target = targetAccount(opts);
+      let target = targetAccount(opts);
       if (!target || typeof target === "string") return noTarget(typeof target === "string" ? target : null);
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
         return;
       }
+      target = await targetForSeat(opts, target, client);
+      if (typeof target === "string") return noTarget(target);
       const qs = new URLSearchParams({ seat: opts.seat, toAccount: target.toAccount,
         ...(target.configDir !== undefined ? { configDir: target.configDir }
           : target.tokenFile === null ? { storedLogin: "1" } : target.tokenFile !== undefined ? { tokenFile: target.tokenFile } : {}) });
       const res = await client.get<{ safe: boolean; reasons?: string[]; message?: string; seat?: SeatView;
         claude?: Parameters<typeof printClaude>[0] }>(`/api/provider/precheck?${qs.toString()}`);
       if (handleHttpError(res, "precheck")) return;
-      if (opts.json) console.log(JSON.stringify(res.data));
+      if (opts.json) console.log(jsonOutput(res.data));
       else {
         console.log(res.data.safe ? "SAFE" : `UNSAFE: ${(res.data.reasons ?? []).join(", ")}`);
         if (res.data.message) console.log(res.data.message);
@@ -650,13 +662,15 @@ and that the seat holds no token reference of its own (move it back with --store
 per seat. The report prints the command that moves the seat back to the dir it ran on. Claude's /status after a tool turn is
 the evidence of the account in use.`)
     .action(async (opts: AccountOpts & { seat: string; forceUnsafe?: boolean; json?: boolean }) => {
-      const target = targetAccount(opts);
+      let target = targetAccount(opts);
       if (!target || typeof target === "string") return noTarget(typeof target === "string" ? target : null);
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
         return;
       }
+      target = await targetForSeat(opts, target, client);
+      if (typeof target === "string") return noTarget(target);
       type SwitchResponse = { status: number; data: { outcome?: string; reasons?: string[]; message?: string; seat?: SwitchReport } };
       let res: SwitchResponse;
       const startedAt = new Date().toISOString();
@@ -676,7 +690,7 @@ the evidence of the account in use.`)
             + `For a Claude seat, rig seat status ${opts.seat} shows its token reference and whether it runs; a second switch would wait for this one.` } };
       }
       if (handleHttpError(res, "switch")) return;
-      if (opts.json) console.log(JSON.stringify(res.data));
+      if (opts.json) console.log(jsonOutput(res.data));
       else {
         const { outcome, reasons, message, seat } = res.data;
         console.log(reasons?.length ? `${outcome ?? "unknown"}: ${reasons.join(", ")}` : outcome ?? "unknown");
@@ -735,7 +749,7 @@ the evidence of the account in use.`)
       );
       if (handleHttpError(res, "moves")) return;
       if (opts.json) {
-        console.log(JSON.stringify(res.data));
+        console.log(jsonOutput(res.data));
         return;
       }
       const { moves: entries, unreadable, truncated } = res.data;
@@ -795,7 +809,7 @@ switch or restart because a report was refused.`)
       const res = await client.post<{ qitemId?: string; errors?: string[] }>("/api/provider/moves", {
         to: opts.to, report, ...(opts.evidenceRef ? { evidenceRef: opts.evidenceRef } : {}),
       });
-      if (res.status < 400 && json) console.log(JSON.stringify(res.data));
+      if (res.status < 400 && json) console.log(jsonOutput(res.data));
       else if (res.status < 400) console.log(`Filed ${res.data.qitemId} to ${opts.to}`);
       else {
         for (const error of res.data.errors ?? []) console.error(`- ${error}`);
