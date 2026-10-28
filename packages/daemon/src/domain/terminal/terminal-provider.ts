@@ -28,6 +28,8 @@ export interface ComposedPane {
   seat: string;
   /** Runtime recorded for a live seat, when available. */
   runtime?: string;
+  /** Agent a `terminal` seat's own startup launches, when its runtime does not say so (Herdr hint). */
+  agent?: "pi";
   /** Human pane label — `<agent> · <slice>` per AC-7. */
   label: string;
   /** Provider-neutral shell command; a provider may wrap it using runtime metadata. */

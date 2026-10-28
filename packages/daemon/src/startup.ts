@@ -2,6 +2,7 @@ import { reportRestoreDeliveryFailure } from "./domain/compaction-restore-notice
 import { ClaudeTokenUsage, claudeTokenUsageReader } from "./domain/provider/claude-token-usage.js";
 import type { ClaudeTokenIdentity } from "./domain/provider/provider-types.js";
 import { TerminalPolicyStore } from "./domain/terminal-policy.js";
+import { terminalAgentHint } from "./domain/terminal/terminal-agent-hint.js";
 import { daemonDatabaseWarnings } from "./daemon-db-path.js";
 import { physicalSessionName } from "./domain/session-registry.js";
 import { makeWatchdogDeliver } from "./domain/watchdog-delivery.js";
@@ -2047,6 +2048,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // NodeInventoryEntry → the composer's minimal LiveSeatRow (single-host
     // inventory: the canonical session name IS the tmux session; no host field).
     const toLiveSeatRow = (e: {
+      nodeId?: string;
       canonicalSessionName: string | null;
       attachmentType?: "tmux" | "external_cli" | null;
       runtime?: string | null;
@@ -2056,6 +2058,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       canonicalSessionName: e.canonicalSessionName,
       attachmentType: e.attachmentType ?? null,
       runtime: e.runtime ?? null,
+      // A terminal seat that starts pi from its own startup: its runtime does not say so.
+      agent: terminalAgentHint(db, e.nodeId, e.runtime),
       tmuxSession: e.canonicalSessionName,
       rigName: e.rigName,
       logicalId: e.logicalId,

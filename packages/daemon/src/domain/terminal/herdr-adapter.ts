@@ -196,9 +196,14 @@ export interface HerdrSplitNode {
 
 export type HerdrLayoutNode = HerdrPaneNode | HerdrSplitNode;
 
-/** Herdr's own agent label for a seat's runtime, or null when Herdr doesn't recognise it. */
+/**
+ * Herdr's own agent label for a seat, or null when Herdr doesn't recognise it. The runtime decides when
+ * it names an agent; a `terminal` seat that starts pi from its own startup has no such runtime, so it
+ * carries the agent its startup launches.
+ */
 function herdrAgent(pane: ComposedPane): "claude" | "codex" | "pi" | null {
-  return pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
+  const byRuntime = pane.runtime === "claude-code" ? "claude" : pane.runtime === "codex" ? "codex" : pane.runtime === "pi" ? "pi" : null;
+  return byRuntime ?? (pane.runtime === "terminal" ? pane.agent ?? null : null);
 }
 
 function herdrPaneCommand(pane: ComposedPane): string {
