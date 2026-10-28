@@ -12,7 +12,7 @@ import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
 import { seatRoutes } from "../src/routes/seat.js";
 
-describe("seat-stop.v1 checked stop", () => {
+describe("seat-stop.v2 checked stop", () => {
   let db: Database.Database;
   let repo: RigRepository;
   let registry: SessionRegistry;
@@ -61,7 +61,7 @@ describe("seat-stop.v1 checked stop", () => {
   }
   function expected(name: string) {
     const result = service.stopPrecondition(name);
-    expect(result).toMatchObject({ contract: "seat-stop.v1" });
+    expect(result).toMatchObject({ contract: "seat-stop.v2" });
     if (!("contract" in result)) throw new Error(result.message);
     return result.expected;
   }
@@ -72,14 +72,17 @@ describe("seat-stop.v1 checked stop", () => {
 
   it("returns a narrow review tuple and refuses malformed expected without effects", async () => {
     const a = seat("dev.a");
-    expect(expected(a.name)).toEqual({ nodeId: a.node.id, sessionId: a.session.id });
+    const gen = () => registry.currentOccupantTenure(a.node.id)?.generationUuid ?? null;
+    expect(expected(a.name)).toEqual({ nodeId: a.node.id, sessionId: a.session.id, occupantGeneration: gen() });
     for (const malformed of [null, {}, { nodeId: a.node.id }, { nodeId: "", sessionId: a.session.id },
-      { nodeId: a.node.id, sessionId: 42 }, { nodeId: a.node.id, sessionId: a.session.id, extra: true }]) {
+      { nodeId: a.node.id, sessionId: 42 }, { nodeId: a.node.id, sessionId: a.session.id, extra: true },
+      { nodeId: a.node.id, sessionId: a.session.id, occupantGeneration: "not-a-uuid" },
+      { nodeId: a.node.id, sessionId: a.session.id, occupantGeneration: 42 }]) {
       expect(await stop(a.name, malformed)).toMatchObject({ ok: false, code: "invalid_stop_precondition" });
     }
     expect(commands).toEqual([]);
     const empty = repo.addNode(a.node.rigId, "dev.empty", { runtime: "claude-code" });
-    expect(expected("dev.empty")).toEqual({ nodeId: empty.id, sessionId: null });
+    expect(expected("dev.empty")).toEqual({ nodeId: empty.id, sessionId: null, occupantGeneration: null });
     expect(await stop("dev.empty", { nodeId: empty.id, sessionId: null })).toMatchObject({ ok: false, code: "no_session" });
   });
 
@@ -95,7 +98,7 @@ describe("seat-stop.v1 checked stop", () => {
     const path = `/api/seat/stop/${encodeURIComponent(a.name)}`;
     const precondition = await app.request(`/api/seat/stop-precondition/${encodeURIComponent(a.name)}`);
     expect(precondition.status).toBe(200);
-    expect(await precondition.json()).toEqual({ contract: "seat-stop.v1", expected: expected(a.name) });
+    expect(await precondition.json()).toEqual({ contract: "seat-stop.v2", expected: expected(a.name) });
     const malformed = await app.request(path, { method: "POST", headers: { "content-type": "application/json" },
       body: JSON.stringify({ reason: "pause", expected: { nodeId: a.node.id } }) });
     expect(malformed.status).toBe(400);

@@ -742,6 +742,81 @@ identity remains unverified; a version number alone cannot clear it.
     printOk(res.data);
   };
 
+  // P20/R6h §5.3c — generation-scoped checked stop with the §-expect-transition discipline: a
+  // read-only preflight first (a daemon that cannot enforce the field gets nothing sent), then the
+  // checked stop, then the echo check (an ok answer without enforcedOccupantGeneration is treated
+  // as NOT generation-enforced and surfaced; the stop itself is real and is reported as such).
+  const stopWithExpectedGeneration = async (
+    seat: string,
+    opts: { reason: string; operator?: string; expectGeneration: string; json?: boolean },
+  ): Promise<void> => {
+    const generation = opts.expectGeneration.trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(generation)) {
+      const message = `--expect-generation needs the occupant generation uuid (got '${opts.expectGeneration}'). Nothing was sent.`;
+      if (opts.json) console.error(JSON.stringify({ error: "expect_generation_unsupported", message }));
+      else console.error(message);
+      process.exitCode = 1;
+      return;
+    }
+    const deps = getDeps();
+    const daemon = await getDaemonStatus(deps.lifecycleDeps);
+    if (!daemonStatusGuard(daemon)) return;
+    const client = deps.clientFactory(getDaemonUrl(daemon));
+    // Preflight (read-only): an older daemon would ignore the field it does not know and answer as
+    // if it had been enforced. Read the tuple first: the occupantGeneration KEY in it is the
+    // capability; a daemon without the key cannot enforce --expect-generation, so nothing is sent.
+    let seen;
+    try {
+      seen = await client.get<Record<string, unknown>>(`/api/seat/stop-precondition/${encodeURIComponent(seat)}`);
+    } catch (err) {
+      if (opts.json) console.error(JSON.stringify({ error: "expect_generation_unsupported", message: `Preflight failed before anything was sent: ${(err as Error).message}` }));
+      else console.error(`Preflight failed before anything was sent: ${(err as Error).message}`);
+      process.exitCode = 2;
+      return;
+    }
+    if (seen.status >= 400) {
+      const data = seen.data as unknown as SeatStatusError;
+      if (opts.json) console.log(JSON.stringify(data, null, 2));
+      else printSeatError(data, `Seat stop preflight failed (HTTP ${seen.status})`);
+      process.exitCode = seen.status >= 500 ? 2 : 1;
+      return;
+    }
+    const tuple = seen.data?.["expected"] as Record<string, unknown> | undefined;
+    if (seen.data?.["contract"] !== "seat-stop.v2" || !tuple || !("occupantGeneration" in tuple)) {
+      const message = `This daemon does not advertise generation keying (stop-precondition contract ${JSON.stringify(seen.data?.["contract"] ?? null)} without the occupantGeneration key), so it cannot enforce --expect-generation ${generation}. Nothing was sent.`;
+      if (opts.json) console.error(JSON.stringify({ error: "expect_generation_unsupported", message }));
+      else console.error(message);
+      process.exitCode = 1;
+      return;
+    }
+    const res = await client.post<Record<string, unknown>>(`/api/seat/stop/${encodeURIComponent(seat)}`, {
+      reason: opts.reason,
+      operator: opts.operator,
+      expected: { nodeId: tuple["nodeId"], sessionId: tuple["sessionId"] ?? null, occupantGeneration: generation },
+    });
+    if (opts.json) console.log(JSON.stringify(res.data, null, 2));
+    if (res.status >= 400) {
+      if (!opts.json) printSeatError(res.data as unknown as SeatStatusError, `Seat stop failed (HTTP ${res.status})`);
+      process.exitCode = res.status >= 500 ? 2 : 1;
+      return;
+    }
+    // Echo check (§5.3c(b)): an ok answer WITHOUT the echo means the generation was NOT enforced —
+    // the stop still happened (it is real and is reported above/below), but it must not be read as
+    // generation-safe.
+    if (!("enforcedOccupantGeneration" in res.data)) {
+      const message = "This daemon answered ok without reporting enforcedOccupantGeneration, so the generation was NOT enforced (it may have ignored the field). Treat the stop as generation-unbound (R6h §5.3c).";
+      if (opts.json) console.error(JSON.stringify({ error: "expect_generation_unsupported", message }));
+      else console.error(`Warning: ${message}`);
+      process.exitCode = 1;
+      return;
+    }
+    if (opts.json) return;
+    const data = res.data;
+    const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+    console.log(`Stopped ${String(data["sessionName"])} (seat ${s?.logicalId}@${s?.rigName}); generation ${String(data["enforcedOccupantGeneration"])} enforced.`);
+    console.log("Session marked exited, binding cleared; siblings untouched. Relaunch via the normal launch surface.");
+  };
+
   const terminalPolicy = cmd.command("set-terminal-policy")
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--preset <preset>", "no-peer-interventions, help-within-instructions, full-control")
@@ -1274,6 +1349,7 @@ Examples:
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--reason <text>", "Audit reason recorded on the session.stopped event")
     .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--expect-generation <uuid>", "Refuse unless the seat's live occupant generation is still <uuid> when the stop takes effect (the pair with the reviewed sessionId, R6h §1.3a). A read-only preflight first: a daemon that does not advertise generation keying is reported with expect_generation_unsupported and nothing is sent; an ok answer that does not echo enforcedOccupantGeneration is treated as NOT generation-enforced (§5.3c)")
     .option("--json", "JSON output for agents")
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
     .addHelpText("after", `
@@ -1287,7 +1363,13 @@ Running counts still exclude the stopped seat; stopping every seat leaves the
 rig stopped. Examples:
   rig seat stop dev-impl@my-rig --reason "wave boundary retirement"
   rig seat stop dev.impl --reason "stuck occupant" --json`)
-    .action(async (seat: string, opts: { reason: string; operator?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { reason: string; operator?: string; expectGeneration?: string; json?: boolean }) => {
+      if (opts.expectGeneration !== undefined) {
+        await stopWithExpectedGeneration(seat, {
+          reason: opts.reason, operator: opts.operator, expectGeneration: opts.expectGeneration, json: opts.json,
+        });
+        return;
+      }
       await runLifecycleVerb("stop", seat, { reason: opts.reason, operator: opts.operator }, opts, (data) => {
         const s = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
         console.log(`Stopped ${String(data["sessionName"])} (seat ${s?.logicalId}@${s?.rigName}).`);

@@ -117,6 +117,22 @@ export interface Session {
 
 // -- Event types --
 
+/** P20/R6h R2.3 — observed-drain snapshot recorded on a checked stop's session.stopped event.
+ *  Counts per surface AT EFFECT TIME. Surfaces (a)/(b) are the DB surfaces this fork can observe
+ *  (R2.1(a) claimed queue rows, R2.1(b) their armed transition wakes). Surfaces (c) guard leases
+ *  and (d) staged typing turns are in-memory inside DeliveryGuard and are NOT observable by a
+ *  fork patch (§5.2): they are recorded as null = UNOBSERVED, never as drained. `schemaKnown`
+ *  false means the claimed_by_generation_uuid column was absent — settle was UNKNOWN and the
+ *  stop refused (R2.3a), so a snapshot with schemaKnown:false never rides a success. */
+export interface StopDrainSnapshot {
+  generation: string | null;
+  claimedRows: number | null;
+  pendingWakes: number | null;
+  schemaKnown: boolean;
+  guardLeases: null;
+  stagedTyping: null;
+}
+
 export type RigEvent =
   | { type: "proof.judged" | "proof.sources_changed"; scope: string; revision: string }
   | { type: "event.delivery_poisoned"; poisonedSeq: number; error: string; payloadSha: string }
@@ -153,7 +169,7 @@ export type RigEvent =
   | { type: "node.codex_permissions_changed"; rigId: string; nodeId: string; from: unknown; to: unknown; replaced?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.codex_profile_changed"; rigId: string; nodeId: string; from: string | null; to: string | null; observation?: unknown; actor: string; reason: string; effect: "future_launches_only" }
   | { type: "node.policy_changed"; rigId: string; nodeId: string; logicalId: string; from: string | null; to: string; launchPosture: "floor" | "full_bypass" | "auto"; reason: string; operator: string }
-  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null }
+  | { type: "session.stopped"; rigId: string; nodeId: string; sessionName: string; reason: string; operator: string | null; drain?: StopDrainSnapshot }
   | { type: "session.cleaned"; rigId: string; nodeId: string; sessionName: string | null; reason: string; operator: string | null; actions: { sessionsExited: string[]; bindingCleared: boolean } }
   | { type: "node.launched"; rigId: string; nodeId: string; logicalId: string; sessionName: string }
   | { type: "topology.roster_recorded"; rigId: string; intendedNodeIds: string[]; source: "materialized_topology" }

@@ -10,7 +10,7 @@ import type { EventBus } from "./event-bus.js";
 import type { TmuxAdapter, SessionProbe, StopPhase } from "../adapters/tmux.js";
 import { shellQuote } from "../adapters/shell-quote.js";
 import { EFFORT_SHAPE, piThinkingValue } from "../adapters/pi-runner-protocol.js";
-import type { NodeInventoryEntry, PersistedEvent } from "./types.js";
+import type { NodeInventoryEntry, PersistedEvent, StopDrainSnapshot } from "./types.js";
 import { deriveCanonicalFromEntry, getNodeInventory } from "./node-inventory.js";
 import { deriveSessionName, parseSessionName } from "./session-name.js";
 import type { NodeLauncher } from "./node-launcher.js";
@@ -149,6 +149,7 @@ export interface SeatRefusal {
     | "guard_unavailable"
     | "guard_target_changed"
     | "selection_changed"
+    | "generation_not_settled"
     | "stop_uncertain";
   message: string;
   guidance?: string;
@@ -228,19 +229,31 @@ export type SetEffortResult =
   | SeatRefusal;
 
 export type StopSeatResult =
-  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string }
-  | (SeatRefusal & { partialEffect?: boolean; stopPhase?: StopPhase });
+  | { ok: true; seat: SeatDescriptor; sessionName: string; sessionId: string; enforcedOccupantGeneration?: string | null }
+  | (SeatRefusal & { partialEffect?: boolean; stopPhase?: StopPhase; occupantGeneration?: string | null; drain?: StopDrainSnapshot });
 
-/** The narrow identity reviewed before an optional checked stop. */
-export interface StopPrecondition { nodeId: string; sessionId: string | null }
+/** The narrow identity reviewed before an optional checked stop. R6h R1: `occupantGeneration`
+ *  (a uuid, or null = the caller bound "no live generation") is the caller's conversation-
+ *  incarnation promise — the pair (sessionId, generation) means "the same launch of the same
+ *  conversation incarnation" (§1.3a). */
+export interface StopPrecondition { nodeId: string; sessionId: string | null; occupantGeneration?: string | null }
 
-/** Reject malformed explicit values so they never fall through to an unchecked stop. */
+const STOP_GENERATION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Reject malformed explicit values so they never fall through to an unchecked stop. The whitelist
+ *  extends R6h R1.1's precondition set with `occupantGeneration?` — present-but-malformed (not a
+ *  uuid) is `invalid_stop_precondition`: an unenforceable precondition may never degrade into an
+ *  unscoped proceed. */
 function validStopPrecondition(value: unknown): value is StopPrecondition {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Record<string, unknown>;
-  return Object.keys(record).sort().join(",") === "nodeId,sessionId"
-    && typeof record.nodeId === "string" && !!record.nodeId.trim()
-    && (record.sessionId === null || typeof record.sessionId === "string" && !!record.sessionId.trim());
+  const keys = Object.keys(record).sort().join(",");
+  if (keys !== "nodeId,sessionId" && keys !== "nodeId,occupantGeneration,sessionId") return false;
+  if (typeof record.nodeId !== "string" || !record.nodeId.trim()) return false;
+  if (!(record.sessionId === null || typeof record.sessionId === "string" && !!record.sessionId.trim())) return false;
+  if ("occupantGeneration" in record
+    && !(record.occupantGeneration === null || typeof record.occupantGeneration === "string" && STOP_GENERATION_UUID.test(record.occupantGeneration))) return false;
+  return true;
 }
 
 export type CleanSeatResult =
@@ -989,10 +1002,20 @@ export class SeatLifecycleService {
   }
 
   /** Read the current node and latest session without changing seat state. */
-  stopPrecondition(seatRef: string): { contract: "seat-stop.v1"; expected: StopPrecondition } | SeatRefusal {
+  stopPrecondition(seatRef: string): { contract: "seat-stop.v2"; expected: StopPrecondition } | SeatRefusal {
     const resolved = this.resolveSeat(seatRef);
     if ("code" in resolved) return resolved;
-    return { contract: "seat-stop.v1", expected: { nodeId: resolved.nodeId, sessionId: this.latestSession(resolved.nodeId)?.id ?? null } };
+    // R6h §5.3c capability echo (preflight half): v2 advertises generation keying by including the
+    // occupantGeneration KEY in the tuple (the value is the live tenure's uuid, or null when none —
+    // null is a value, the KEY's presence is the capability). An older daemon's tuple lacks the key.
+    return {
+      contract: "seat-stop.v2",
+      expected: {
+        nodeId: resolved.nodeId,
+        sessionId: this.latestSession(resolved.nodeId)?.id ?? null,
+        occupantGeneration: this.sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid ?? null,
+      },
+    };
   }
 
   /** Stop one managed seat; an explicit expected tuple activates strict identity checks. */
@@ -1047,18 +1070,29 @@ export class SeatLifecycleService {
   ): Promise<StopSeatResult> {
     const guard = this.tmuxAdapter.deliveryGuard;
     if (!guard) return { ok: false, code: "guard_unavailable", message: "Checked stop requires the delivery guard." };
+    const liveGeneration = (): string | null => this.sessionRegistry.currentOccupantTenure(expected.nodeId)?.generationUuid ?? null;
+    // R5.2: every checked-stop refusal makes the live generation observable in the payload, so a
+    // scripted retry names the generation it must re-read. Success echoes the generation the stop
+    // enforced (§5.3c capability echo) — see stopManagedTmuxSeat.
+    const withGeneration = (r: StopSeatResult): StopSeatResult => r.ok ? r : { ...r, occupantGeneration: liveGeneration() };
     const selection = (): SeatRefusal | null => {
       const current = this.resolveSeat(input.seatRef);
       if ("code" in current || current.nodeId !== expected.nodeId || (this.latestSession(current.nodeId)?.id ?? null) !== expected.sessionId) {
         return { ok: false, code: "selection_changed", message: "The selected seat or latest session changed; review the stop precondition again." };
       }
+      // R1 (§1.3a): the pair — the launch (sessionId) AND the conversation incarnation (generation),
+      // always together. A continuation keeps the generation but mints a new session row, so either
+      // half moving refuses; a generation-only check would kill a relaunch's reincarnation.
+      if (expected.occupantGeneration !== undefined && liveGeneration() !== expected.occupantGeneration) {
+        return { ok: false, code: "selection_changed", message: `The seat's occupant generation is not the one the stop was made under (expected ${expected.occupantGeneration}, live ${liveGeneration() ?? "none"}); review the stop precondition again.` };
+      }
       return null;
     };
     const initial = selection();
-    if (initial) return initial;
+    if (initial) return withGeneration(initial);
     if (expected.sessionId === null) return { ok: false, code: "no_session", message: "The selected seat has no session to stop." };
     try {
-      return await guard.lifecycle([expected.nodeId], async () => {
+      const result = await guard.lifecycle([expected.nodeId], async (): Promise<StopSeatResult> => {
         const stale = selection();
         if (stale) return stale;
         guard.checkInput(expected.nodeId);
@@ -1073,14 +1107,58 @@ export class SeatLifecycleService {
         if (afterProbe) return afterProbe;
         guard.checkInput(resolved.nodeId);
         if (probed.state === "absent") return { ok: false, code: "session_not_live", message: `Session "${session.session_name}" is absent in tmux; there is nothing to stop.`, guidance: "A dead seat with stale records is returned to launchable with: rig seat clean" };
-        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true, { selection, guard });
+        // R2 settle before stop, over the observable DB surfaces (R2.1(a)/(b)) only. Guard leases
+        // and staged typing turns ((c)/(d)) are in-memory inside DeliveryGuard and are NOT claimed.
+        // UNKNOWN (schema-absent column, R2.3a) refuses too — an unobservable surface may not be
+        // reported as a drained one.
+        const settleGeneration = expected.occupantGeneration ?? liveGeneration();
+        const drain = this.generationDrainSnapshot(settleGeneration);
+        if (!drain.settled) {
+          const refusal: StopSeatResult = { ok: false, code: "generation_not_settled", message: `Generation ${settleGeneration ?? "(none)"} still has in-flight work (${drain.summary}); drain or re-check, then re-issue the stop.`, drain: drain.snapshot };
+          return refusal;
+        }
+        return this.stopManagedTmuxSeat(resolved, session, input.reason, input.operator, true, { selection, guard, generation: settleGeneration });
       });
+      return withGeneration(result);
     } catch (error) {
       const code = (error as { code?: string }).code;
-      return { ok: false, code: code === "guard_target_changed" || code === "guard_target_unknown" ? "selection_changed"
+      return withGeneration({ ok: false, code: code === "guard_target_changed" || code === "guard_target_unknown" ? "selection_changed"
         : code === "typing_guard_enabled" || code === "draft_aware_lifecycle" ? "typing_guard_enabled" : "tmux_probe_failed",
-      message: (error as Error).message };
+      message: (error as Error).message });
     }
+  }
+
+  /** P20/R6h R2 — settle predicate over the DB surfaces for one generation. `claimedRows` counts
+   *  queue rows in an active state claimed by the generation (R2.1(a)); `pendingWakes` counts the
+   *  armed transition wakes belonging to those rows (R2.1(b)). The snapshot records what was
+   *  checked; guard leases and staged typing ((c)/(d)) stay null = UNOBSERVED (§5.2) and are named
+   *  as such in the refusal summary rather than silently omitted. */
+  private generationDrainSnapshot(generation: string | null): { settled: boolean; summary: string; snapshot: StopDrainSnapshot } {
+    if (generation === null) {
+      return { settled: true, summary: "no live tenure; nothing generation-keyed to drain", snapshot: { generation: null, claimedRows: null, pendingWakes: null, schemaKnown: true, guardLeases: null, stagedTyping: null } };
+    }
+    const columns = this.db.prepare("PRAGMA table_info(queue_items)").all() as { name: string }[];
+    const wakeColumns = this.db.prepare("PRAGMA table_info(queue_transition_wakes)").all() as { name: string }[];
+    const schemaKnown = columns.some(c => c.name === "claimed_by_generation_uuid") && wakeColumns.length > 0;
+    if (!schemaKnown) {
+      // R2.3a: settle evaluates to UNKNOWN and REFUSES — never "settled".
+      return {
+        settled: false,
+        summary: "schema unknown: the claimed_by_generation_uuid column is absent, so drain state is UNKNOWN (R2.3a)",
+        snapshot: { generation, claimedRows: null, pendingWakes: null, schemaKnown: false, guardLeases: null, stagedTyping: null },
+      };
+    }
+    const claimed = (this.db.prepare(
+      "SELECT COUNT(*) AS n FROM queue_items WHERE claimed_by_generation_uuid = ? AND state IN ('in-progress','blocked')",
+    ).get(generation) as { n: number }).n;
+    const wakes = (this.db.prepare(
+      "SELECT COUNT(*) AS n FROM queue_transition_wakes w JOIN queue_items q ON w.qitem_id = q.qitem_id WHERE q.claimed_by_generation_uuid = ? AND q.state IN ('in-progress','blocked') AND w.phase = 'armed'",
+    ).get(generation) as { n: number }).n;
+    const snapshot: StopDrainSnapshot = { generation, claimedRows: claimed, pendingWakes: wakes, schemaKnown: true, guardLeases: null, stagedTyping: null };
+    if (claimed > 0 || wakes > 0) {
+      return { settled: false, summary: `claimed_rows=${claimed} pending_wakes=${wakes}; guard leases and staged typing turns are unobserved by this runtime (§5.2), not asserted drained`, snapshot };
+    }
+    return { settled: true, summary: `claimed_rows=0 pending_wakes=0; guard leases and staged typing turns are unobserved by this runtime (§5.2), not asserted drained`, snapshot };
   }
 
   async cleanSeat(input: { seatRef: string; reason: string; operator?: string | null }): Promise<CleanSeatResult> {
@@ -1871,7 +1949,7 @@ export class SeatLifecycleService {
     reason: string,
     operator: string | null | undefined,
     recordStopIntent: boolean,
-    checked?: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]> },
+    checked?: { selection: () => SeatRefusal | null; guard: NonNullable<TmuxAdapter["deliveryGuard"]>; generation: string | null },
   ): Promise<StopSeatResult> {
     const seat = this.describe(resolved);
     const beforeEffect = checked && (() => {
@@ -1898,6 +1976,7 @@ export class SeatLifecycleService {
       };
     }
     let persisted: PersistedEvent | null = null;
+    let enforced: string | null | undefined;
     const tx = this.db.transaction((): SeatRefusal | null => {
       if (checked) {
         const changed = checked.selection();
@@ -1911,6 +1990,12 @@ export class SeatLifecycleService {
         this.sessionRegistry.updateStatus(session.id, "exited");
       }
       this.sessionRegistry.clearBinding(resolved.nodeId);
+      // R2.3 — the drain snapshot is observed AT EFFECT TIME, inside this transaction: "no stop
+      // before drain" is an observed property of the stop, not an intention. The generation read
+      // here is also the §5.3c capability echo (what the stop enforced when it took effect).
+      const enforcedGeneration = checked
+        ? this.sessionRegistry.currentOccupantTenure(resolved.nodeId)?.generationUuid ?? null
+        : undefined;
       persisted = this.eventBus.persistWithinTransaction({
         type: "session.stopped",
         rigId: seat.rigId,
@@ -1918,7 +2003,9 @@ export class SeatLifecycleService {
         sessionName: session.session_name,
         reason: reason.trim(),
         operator: operator ?? null,
+        ...(checked ? { drain: this.generationDrainSnapshot(checked.generation).snapshot } : {}),
       });
+      enforced = enforcedGeneration;
       return null;
     });
     try {
@@ -1936,7 +2023,7 @@ export class SeatLifecycleService {
       if (!checked) throw error;
       return { ok: false, code: "stop_uncertain", message: `Session kill completed, but stop finalization failed: ${(error as Error).message}`, partialEffect: true, stopPhase: "kill_attempted" };
     }
-    return { ok: true, seat, sessionName: session.session_name, sessionId: session.id };
+    return { ok: true, seat, sessionName: session.session_name, sessionId: session.id, ...(enforced !== undefined ? { enforcedOccupantGeneration: enforced } : {}) };
   }
 
   private nonTerminalSessions(nodeId: string): LatestSessionRow[] {
