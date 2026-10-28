@@ -51,6 +51,7 @@ import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/communi
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 import { seatLaunchAdditionsReport } from "./seat-launch-additions.js";
 import { seatSkillPaths } from "./seat-skill-storage.js";
+import { countFreshStartActions, declaredFreshStartActions } from "./terminal-seat.js";
 
 /**
  * S5 (OPR.0.5.4.7) — the seat-lifecycle verb surface: set-model, single-seat stop,
@@ -128,6 +129,7 @@ export interface SeatRefusal {
     | "fresh_required"
     | "unmanaged_session_collision"
     | "startup_context_missing"
+    | "startup_context_drift"
     | "startup_context_malformed"
     | "startup_context_runtime_mismatch"
     | "runtime_adapter_missing"
@@ -1218,6 +1220,28 @@ export class SeatLifecycleService {
   }
 
   /**
+   * P18 (R5 Q1-a): a terminal seat's agent is started only by its persisted fresh-start actions, and the spec is read once,
+   * at creation. When the seat's stored launch recipe still declares fresh-start actions (pod or member startup) but the
+   * persisted record holds none, a fresh launch would plan zero actions and leave a bare shell, so it refuses by name. It
+   * compares only what the recipe declares directly; a seat with no stored recipe, or a non-terminal seat, is not checked.
+   */
+  private terminalSpecDrift(
+    node: { id: string; logicalId: string; runtime: string | null },
+    context: ParsedStartupContext,
+  ) {
+    if (node.runtime !== "terminal") return null;
+    if (countFreshStartActions(context.startupActions) > 0) return null;
+    const declared = declaredFreshStartActions(this.rigRepo.getNodeLaunchRecipe(node.id), node.logicalId);
+    if (!declared) return null;
+    return {
+      ok: false as const,
+      code: "startup_context_drift" as const,
+      message: `Seat ${node.logicalId} declares ${declared} fresh-start launch action(s) in its spec, but its persisted startup context holds none; a fresh launch would start no agent and leave a bare shell.`,
+      guidance: "The persisted startup context no longer matches the spec the seat was created from. Re-create the seat from its spec so the actions are persisted, then launch it.",
+    };
+  }
+
+  /**
    * Resolve a seat snapshot into current launch settings and persisted startup context.
    * Return a refusal for stale seats, unavailable services, or runtime/context mismatch.
    * Reads only: callers receive no reservation or launch guarantee. Execution repeats
@@ -1243,6 +1267,8 @@ export class SeatLifecycleService {
         message: `Persisted startup context runtime '${startup.context.runtime}' does not match current node runtime '${node.runtime ?? "missing"}'.`,
       };
     }
+    const drift = this.terminalSpecDrift(node, startup.context);
+    if (drift) return drift;
     const adapter = seatAdapter(this.runtimeAdapters, node.runtime, this.latestSession(node.id)?.community_harness);
     if (!adapter) {
       return {
