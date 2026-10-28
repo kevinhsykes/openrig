@@ -357,10 +357,13 @@ describe("rig provider status — usage windows", () => {
     expect([r.err, r.out, r.exitCode]).toEqual(["Codex usage windows are off. Turn them on with: rig config set provider.usage_windows true", "", 1]);
   });
 
-  it("--provider takes codex or claude only", async () => {
+  it("--provider is passed to the daemon as given, and the daemon's refusal (its live list of known kinds) is printed with exit 1", async () => {
+    // The CLI keeps no list of known kinds (P4, amendment F3): the daemon registers rails at load and owns the list.
+    refreshByProvider = { gemini: { status: 400, body: { error: "usage windows can be refreshed for codex, claude (got gemini)" } } };
     const r = await run(["status", "--refresh", "--provider", "gemini"], port);
-    expect([r.err, r.exitCode]).toEqual([`--provider must be a known provider kind (known: codex, claude; got gemini)`, 1]);
-    expect(posts).toEqual([]);
+    expect(posts).toEqual([{ provider: "gemini" }]);
+    expect(r.err).toContain("usage windows can be refreshed for codex, claude (got gemini)");
+    expect(r.exitCode).toBe(1);
   });
 
   it("--json stays verbatim", async () => {

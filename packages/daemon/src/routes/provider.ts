@@ -11,7 +11,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
-import { KNOWN_PROVIDER_KINDS_LABEL, isKnownProviderKind, type ProviderKind } from "../domain/provider/provider-types.js";
+import { knownProviderKinds, type ProviderKind } from "../domain/provider/provider-types.js";
 import { claudeSeatConfigDirHooks } from "../domain/provider/claude-seat-switch.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
@@ -108,12 +108,14 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
   const unavailable = 503 as const;
   // Error text for a non-string provider value: JSON ("null", "42", "{}"), never `[object Object]`.
   const shown = (v: unknown): string => (typeof v === "string" ? v : JSON.stringify(v));
-  const okProvider = (p: string | undefined): boolean => p === undefined || isKnownProviderKind(p);
+  // Every validator asks the live list: the built-in kinds and the rails registered at load (provider-rails.ts). A kind with no reader
+  // answers `unavailable` from the service.
+  const okProvider = (p: string | undefined): boolean => p === undefined || knownProviderKinds().includes(p);
   // When present, an account filter must be a non-empty, non-whitespace ref.
   const okAccount = (a: string | undefined): boolean => a === undefined || a.trim().length > 0;
   // A malformed filter (bad provider enum or empty account) is a 400; returns the message or null.
   const filterError = (provider: string | undefined, account: string | undefined): string | null => {
-    if (!okProvider(provider)) return `invalid provider: ${provider} (known: ${KNOWN_PROVIDER_KINDS_LABEL})`;
+    if (!okProvider(provider)) return `invalid provider: ${provider} (known: ${knownProviderKinds().join(", ")})`;
     if (!okAccount(account)) return "account must be a non-empty ref";
     return null;
   };
@@ -151,13 +153,13 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       raw = {};
     }
     // Only an ABSENT field defaults to "codex". A PRESENT non-string (null, 42, an object) falls
-    // to the registry check below and is refused with the same 400 naming the known list.
+    // to the live-list check below and is refused with the same 400 naming the known list.
     const rawProvider = raw !== null && typeof raw === "object" && !Array.isArray(raw)
       ? (raw as Record<string, unknown>)["provider"]
       : undefined;
     const provider = rawProvider === undefined ? "codex" : rawProvider;
-    if (!isKnownProviderKind(provider)) {
-      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${shown(provider)})` }, 400);
+    if (typeof provider !== "string" || !knownProviderKinds().includes(provider)) {
+      return c.json({ error: `usage windows can be refreshed for ${knownProviderKinds().join(", ")} (got ${shown(provider)})` }, 400);
     }
     const token = (raw as Record<string, unknown> | null)?.["claudeToken"];
     if (token !== undefined) {
@@ -173,7 +175,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if ("disabled" in result) {
       return c.json({
         error: "usage_windows_disabled",
-        message: `${provider === "codex" ? "Codex" : "Claude"} usage windows are off. Turn them on with: rig config set provider.usage_windows true`,
+        message: `${provider === "codex" ? "Codex" : provider === "claude" ? "Claude" : provider} usage windows are off. Turn them on with: rig config set provider.usage_windows true`,
       }, 409);
     }
     if ("unavailable" in result) return c.json({ error: `${provider} usage windows are not available on this daemon` }, 400);
@@ -238,9 +240,12 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     const asked = Array.isArray(body["providers"])
       ? body["providers"]
       : [body["provider"] === undefined ? "codex" : body["provider"]];
-    const bad = asked.find((p) => !isKnownProviderKind(p));
+    // The live list, as every other validator. A kind that is not a built-in (a collector rail) has no remote refresh reader or
+    // deadline: this host's own leg refreshes its feed, and each remote host's leg is a NAMED failure, `provider_has_no_reader`
+    // (usage-across-hosts.ts remote()), returned before any request is sent.
+    const bad = asked.find((p) => typeof p !== "string" || !knownProviderKinds().includes(p));
     if (asked.length === 0 || bad !== undefined) {
-      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${asked.length === 0 ? "none" : shown(bad)})` }, 400);
+      return c.json({ error: `usage windows can be refreshed for ${knownProviderKinds().join(", ")} (got ${asked.length === 0 ? "none" : shown(bad)})` }, 400);
     }
     const providers = [...new Set(asked as ProviderKind[])];
     const hosts = body["hosts"];
