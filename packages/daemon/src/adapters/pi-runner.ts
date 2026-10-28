@@ -1118,6 +1118,50 @@ export function piLaunchCapabilityError(
   return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
+// ── Seat dir preparation + the Pi model catalog seed ──────────────────────────
+
+/** Ops seam so the seed is unit-testable without touching the real filesystem. */
+export interface SeatDirPrepOps {
+  mkdir(path: string): void;
+  exists(path: string): boolean;
+  writeFile(path: string, data: string, mode: number): void;
+}
+
+const nodeSeatDirPrepOps: SeatDirPrepOps = {
+  mkdir: (path) => fs.mkdirSync(path, { recursive: true }),
+  exists: (path) => fs.existsSync(path),
+  writeFile: (path, data, mode) => fs.writeFileSync(path, data, { mode }),
+};
+
+/** The empty Pi model catalog. A Pi seat loads models ONLY from
+ *  `<agentDir>/models.json` (the seat layout in pi-runner-protocol.ts); the runner
+ *  historically created the directory but never the file, so every fresh seat started with
+ *  an empty catalog and exited `Model "<pin>" not found` when the launch pinned a model.
+ *  0600 because merged provider entries reference key material by path. */
+export const PI_MODELS_SEED_CONTENT = '{"providers": {}}\n';
+
+/** Seed `<agentDir>/models.json` if and only if it does not exist. An existing file is never
+ *  read, rewritten, or re-permissioned: it may carry providers and keys. */
+export function seedPiModelsJson(agentDir: string, ops: SeatDirPrepOps = nodeSeatDirPrepOps): void {
+  const modelsJsonPath = nodePath.join(agentDir, "models.json");
+  if (ops.exists(modelsJsonPath)) return;
+  ops.writeFile(modelsJsonPath, PI_MODELS_SEED_CONTENT, 0o600);
+}
+
+/** Create the seat's agent/session dirs and — for Pi — seed the model catalog. main() calls
+ *  this BEFORE buildPiChildEnv and the spawn, so a child never starts against a missing
+ *  catalog. OMP shares the dir layout but not Pi's model catalog, so the seed is Pi-only. */
+export function prepareSeatDirs(
+  agentDir: string,
+  sessionsDir: string,
+  runtime: RunnerRuntime,
+  ops: SeatDirPrepOps = nodeSeatDirPrepOps,
+): void {
+  ops.mkdir(agentDir);
+  ops.mkdir(sessionsDir);
+  if (runtime === "pi") seedPiModelsJson(agentDir, ops);
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   let args: RunnerArgs;
   try {
@@ -1130,8 +1174,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
 
   const runtime = args.runtime ?? "pi";
   const paths = piSeatPaths(args.stateRoot, args.sessionName);
-  fs.mkdirSync(paths.agentDir, { recursive: true });
-  fs.mkdirSync(paths.sessionsDir, { recursive: true });
+  prepareSeatDirs(paths.agentDir, paths.sessionsDir, runtime);
 
   const { catchUpSince } = prepareRunnerSidecar(
     {
