@@ -358,14 +358,20 @@ const collectorIdentity = record({
 
 /** A quota-collector rail row from a remote host (provider is the rail id, e.g. zai). The rail need not be registered here: a host
  *  can meter a rail this daemon doesn't, and refusing it would drop that host's native rows with it. What must hold is that the
- *  row says it came from the collector file and its identity is the collector's shape, naming the row's own rail. */
+ *  row says it came from the collector file and its identity is the collector's shape, naming the row's own rail.
+ *
+ *  The one row without an identity is the collector's own "this rail was not read" row ("no row in file", "no windows in file"):
+ *  identity null, no windows, availability unknown and a reason. A host serving one is not malformed; refusing it made the whole
+ *  host "unavailable" and dropped its native rows (T3 bb4a518aa). Anything else with a null identity still refuses. */
 function isCollectorUsageRow(v: Record<string, unknown>): boolean {
   const source = v["source"];
   const identity = v["identity"];
-  return isProviderRailId(v["provider"])
-    && isRecord(source) && source["kind"] === "quota_collector_file"
-    && collectorIdentity(identity) && (identity as Record<string, unknown>)["rail"] === v["provider"]
-    && record(usageRowFields)(v);
+  if (!(isProviderRailId(v["provider"]) && isRecord(source) && source["kind"] === "quota_collector_file" && record(usageRowFields)(v))) return false;
+  if (identity === null) {
+    return v["currentAvailability"] === "unknown" && Array.isArray(v["windows"]) && v["windows"].length === 0
+      && typeof v["unavailableReason"] === "string" && v["unavailableReason"].trim().length > 0;
+  }
+  return collectorIdentity(identity) && (identity as Record<string, unknown>)["rail"] === v["provider"];
 }
 
 /** A served row with every field the grouping and the views read, typed as provider-types.ts says. */

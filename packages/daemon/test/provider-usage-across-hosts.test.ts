@@ -799,7 +799,38 @@ describe("P4 fix B: a remote host's quota-collector rail row crosses the HTTP bo
     ]);
   });
 
+  // T3 bb4a518aa, re-expressed on the fork's validator: the collector's own "not read" row has identity null.
+  const unread = (patch: (r: Body) => Body = (r) => r): Body => patch({
+    ...zaiRow(), provider: "qwen", identity: null, windows: [], currentAvailability: "unknown", unavailableReason: "no windows in file",
+  });
+
+  it("a remote host serving the collector's own unread row (identity null) stays served, with its native rows and that row", async () => {
+    const rail = await host("rail", { rewrite: withRow(unread()) });
+    await refreshDirect(rail, "codex");
+    const hub = await host("hub", { registry: [rail.entry()] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    expect(body.hosts.find((h) => h.hostId === "rail")).toMatchObject({ usage: "served" });
+    expect(body.items.filter((g) => g.provider === "qwen").flatMap((g) => g.observations).map((o) => o.row))
+      .toEqual([expect.objectContaining({ identity: null, currentAvailability: "unknown", unavailableReason: "no windows in file" })]);
+    expect(body.items.some((g) => g.provider === "codex" && g.observations.some((o) => o.hostId === "rail"))).toBe(true);   // native rows kept
+  });
+
+  it.each([
+    ["with windows", (r: Body) => ({ ...r, windows: [(zaiRow()["windows"] as unknown[])[0]] })],
+    ["marked available", (r: Body) => ({ ...r, currentAvailability: "available" })],
+    ["with no reason", (r: Body) => ({ ...r, unavailableReason: "" })],
+    ["with a blank reason", (r: Body) => ({ ...r, unavailableReason: "   " })],
+    ["whose source is not the collector file", (r: Body) => ({ ...r, source: { kind: "codex_app_server", host: "local" } })],
+  ])("an identity-null row %s is still malformed and makes the host unavailable", async (_label, patch) => {
+    expect(isUsageRow(unread(patch))).toBe(false);
+    const bad = await host("bad", { rewrite: withRow(unread(patch)) });
+    const hub = await host("hub", { registry: [bad.entry()] });
+    expect((await view(hub)).body.hosts.find((h) => h.hostId === "bad")).toMatchObject({ usage: "unavailable", usageReason: MISFORMED });
+  });
+
   it("isUsageRow accepts a collector row and refuses the same row with a broken identity", () => {
+    expect(isUsageRow(unread())).toBe(true);
     expect(isUsageRow(zaiRow())).toBe(true);
     expect(isUsageRow(zaiRow((r) => ({ ...r, identity: { ...(r["identity"] as Body), window: 5 } })))).toBe(false);
   });
