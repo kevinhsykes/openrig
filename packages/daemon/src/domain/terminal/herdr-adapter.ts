@@ -73,6 +73,7 @@ import type {
   HerdrTransport,
   HerdrTransportFactory,
 } from "./herdr-transport.js";
+import { HerdrResponseError } from "./herdr-transport.js";
 import { buildTileGrid, planTileLabels, type TileGrid, type TileNodes } from "./tile-layout.js";
 
 /** Sentinel host for herdr-surface degrades (a pane herdr itself failed to render). */
@@ -526,6 +527,15 @@ export class HerdrAdapter implements TerminalProvider {
     let defaultTabId: string | null = null;
     let createErr: unknown = null;
     let label = plan.workspaceLabel;
+    // Only herdr's own refusal (an error reply) proves nothing was created, so only it may lead to another create. A lost or
+    // malformed reply may have created the workspace already; creating again would leave a duplicate.
+    const unconfirmedCreate = (): OpenViewResult => {
+      const reason = `herdr workspace.create outcome is unconfirmed: ${createErr instanceof Error ? createErr.message : "no workspace id in the response"}. Inspect existing workspaces before reopening.`;
+      for (const page of view.pages) {
+        for (const pane of page) degraded.push({ seat: pane.seat, host: HERDR_SURFACE_HOST, reason });
+      }
+      return { provider: this.name, ok: view.opened.length === 0, opened, absent, degraded, pages: 0, error: reason, code: "herdr_workspace_failed" };
+    };
     try {
       const open = extractWorkspaceLabels(await this.transport.request("workspace.list", {}));
       if (open.includes(label)) {
@@ -544,6 +554,7 @@ export class HerdrAdapter implements TerminalProvider {
     } catch (err) {
       createErr = err;
     }
+    if (workspaceId == null && !(createErr instanceof HerdrResponseError)) return unconfirmedCreate();
     if (workspaceId == null) {
       let existing: string[] = [];
       try { existing = extractWorkspaceLabels(await this.transport.request("workspace.list", {})); } catch { /* unknown → bare fallback */ }
@@ -555,15 +566,16 @@ export class HerdrAdapter implements TerminalProvider {
           const created = await this.transport.request("workspace.create", { focus: false, label: suffixed });
           workspaceId = extractWorkspaceId(created);
           defaultTabId = extractTabId(created);
+          createErr = null;
           if (workspaceId != null) {
-            createErr = null;
             notes.push(`A workspace named "${plan.workspaceLabel}" already exists, so this one is "${suffixed}".`);
           }
         } catch (err) {
-          createErr = createErr ?? err;
+          createErr = err;
         }
       }
     }
+    if (workspaceId == null && !(createErr instanceof HerdrResponseError)) return unconfirmedCreate();
     if (workspaceId == null) {
       try {
         const created = await this.transport.request("workspace.create", { focus: false });
@@ -572,9 +584,10 @@ export class HerdrAdapter implements TerminalProvider {
         if (workspaceId != null) notes.push(`herdr refused the workspace name "${plan.workspaceLabel}"; the workspace is unnamed.`);
         createErr = null;
       } catch (err) {
-        createErr = createErr ?? err;
+        createErr = err;
       }
     }
+    if (workspaceId == null && !(createErr instanceof HerdrResponseError)) return unconfirmedCreate();
     if (workspaceId == null) {
       // No workspace → nothing can tile. Degrade every pane honestly.
       const reason = `herdr workspace.create failed: ${

@@ -6,7 +6,7 @@ import { TerminalService, type TerminalServiceDeps } from "../src/domain/termina
 import { HerdrAdapter, HERDR_PANES_PER_PAGE, HERDR_PANES_UNCONFIRMED_NOTE, planHerdrLayout } from "../src/domain/terminal/herdr-adapter.js";
 import { PANES_PER_PAGE } from "../src/domain/terminal/view-composer.js";
 import { MAX_COLS, MAX_PER_WORKSPACE } from "../src/domain/cmux-layout-service.js";
-import type { HerdrResult, HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
+import { HerdrResponseError, type HerdrResult, type HerdrTransport } from "../src/domain/terminal/herdr-transport.js";
 import type { ComposedView, OpenViewResult, TerminalProvider } from "../src/domain/terminal/terminal-provider.js";
 
 const RIG = "big";
@@ -173,7 +173,7 @@ describe("S08 — the rig opens as one Herdr space, 16 cells per tab", () => {
     const { transport, requests } = herdrTransport((m, p) => {
       if (m === "workspace.list" && ++lists === 1) throw new Error("list unavailable");
       if (m === "workspace.create") {
-        if (p["label"] === RIG) throw new Error("label already in use");
+        if (p["label"] === RIG) throw new HerdrResponseError("label already in use");
         return { type: "c", workspace: { workspace_id: "w2" }, tab: { tab_id: "w2:t0" } };
       }
       if (m === "workspace.list") return { type: "workspaces", workspaces: [{ label: RIG }, { label: `${RIG} (2)` }] };
