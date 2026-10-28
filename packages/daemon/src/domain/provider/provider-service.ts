@@ -3,7 +3,7 @@
 // switch composition + action recording) is seams C/D. Keeping this an interface lets the routes
 // register and honestly 503 until the production service is wired.
 
-import type { FourBlockReadModel, PrecheckResult } from "./provider-types.js";
+import type { FourBlockReadModel, PrecheckResult, ProviderKind } from "./provider-types.js";
 import type { UsageRefreshResult } from "./usage-windows.js";
 import type { RestartInPlaceResult } from "../seat-lifecycle-service.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
@@ -103,6 +103,7 @@ export interface ProviderService {
   /** Precheck-gated switch; returns an explicit business outcome (never a transport error). With the seat's restart it
    *  moves that seat to a login saved in the Codex home it runs on. */
   switchAccount(input: ProviderSwitchInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<ProviderSwitchResult>;
-  /** Slice 01: one bounded native read of the usage windows (coalesced); `disabled` while the switch is off. */
-  refreshUsage?(provider: "codex" | "claude", token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }>;
+  /** Slice 01: one bounded native read of the usage windows (coalesced); `disabled` while the switch is off. A kind
+   *  outside the known rails has no reader here and answers `{ unavailable: true }` (BR-1), never another rail's rows. */
+  refreshUsage?(provider: ProviderKind, token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }>;
 }

@@ -3,7 +3,7 @@
 // last reading, its reset and its last observed exhaustion. A Claude label/reference is not provider account identity. Nothing here reads a provider, an auth file or a
 // profile, and nothing is matched by percentages or reset times: the key is the only join.
 import type Database from "better-sqlite3";
-import type { UsageAllowanceIdentity, ClaudeTokenIdentity, ClaudeTokenProbe } from "./provider-types.js";
+import { isKnownProviderKind, KNOWN_PROVIDER_KINDS_LABEL, type ClaudeTokenIdentity, type ClaudeTokenProbe, type ProviderKind, type UsageAllowanceIdentity } from "./provider-types.js";
 import type { UsageReading, UsageReadWindow } from "./usage-windows.js";
 
 /** Exhaustion episodes kept per allowance key. */
@@ -83,7 +83,11 @@ function episodesOf(row: Row, windows: UsageReadWindow[]): Array<Omit<Exhaustion
 }
 
 export class ProviderAccountReadingsStore<I extends UsageAllowanceIdentity | ClaudeTokenIdentity = UsageAllowanceIdentity> {
-  constructor(private readonly db: Database.Database, private readonly provider: "codex" | "claude" = "codex") {}
+  /** The provider every row of this store belongs to (the readings table's provider column). A kind outside the
+   *  known rails is refused at construction (BR-1), never written silently beside codex/claude rows. */
+  constructor(private readonly db: Database.Database, private readonly provider: ProviderKind = "codex") {
+    if (!isKnownProviderKind(provider)) throw new Error(`unknown provider kind: ${provider} (known: ${KNOWN_PROVIDER_KINDS_LABEL})`);
+  }
 
   /** Store one reading of `key`. Only the identity labels, the windows' four fields, the limit evidence and the
    *  observation time are written. The same observation (time and values) isn't written twice; a newer observation

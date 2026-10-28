@@ -4,7 +4,32 @@
 // additive evolution only after schema lock. BR-6: accountId/profileRef are opaque refs,
 // NEVER a token/header/auth-file content.
 
-export type ProviderKind = "codex" | "claude";
+/**
+ * Whose subscription pays. Open additively (same pattern as SignalWindow below): a value outside
+ * today's rails is representable, so a new rail can name itself before this module learns of it.
+ * The edges validate against KNOWN_PROVIDER_KINDS and their error text names that list; a kind
+ * outside it has no reader here and must fail visibly (BR-1), never serve another rail's reading.
+ */
+export type ProviderKind = "codex" | "claude" | (string & {});
+
+/**
+ * The provider kinds this codebase has real rails for (readers, accounts, routes). NOT the
+ * ProviderKind union and NOT any default set: it is the registry the edges validate against and
+ * that error text names. Additive: new kinds join the end.
+ */
+export const KNOWN_PROVIDER_KINDS = ["codex", "claude"] as const;
+
+/** A kind in the KNOWN_PROVIDER_KINDS registry. */
+export type KnownProviderKind = (typeof KNOWN_PROVIDER_KINDS)[number];
+
+/** Human list of the known kinds for validation error text, e.g. "codex, claude". */
+export const KNOWN_PROVIDER_KINDS_LABEL = KNOWN_PROVIDER_KINDS.join(", ");
+
+/** True only for a kind in KNOWN_PROVIDER_KINDS (the open ProviderKind union accepts any string). */
+export function isKnownProviderKind(x: unknown): x is KnownProviderKind {
+  return typeof x === "string" && (KNOWN_PROVIDER_KINDS as readonly string[]).includes(x);
+}
+
 export type AccountAuthState = "active" | "needs_reauth" | "unknown";
 
 /** accounts[] — one row per known provider account. */

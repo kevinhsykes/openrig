@@ -33,7 +33,8 @@ import type {
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
-import type { FourBlockReadModel, PrecheckResult, ProviderSignal } from "./provider-types.js";
+import type { FourBlockReadModel, PrecheckResult, ProviderKind, ProviderSignal } from "./provider-types.js";
+import { isKnownProviderKind } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
 
@@ -169,11 +170,15 @@ export class ProviderServiceImpl implements ProviderService {
     return { ...model, usage: allUsage, seatAccounts };
   }
 
-  async refreshUsage(provider: "codex" | "claude", token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {
+  async refreshUsage(provider: ProviderKind, token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {
+    // BR-1 first: a kind outside the known rails has no reader here — { unavailable: true } even
+    // while the switch is off. Known kinds keep the disabled gate below.
+    if (!isKnownProviderKind(provider)) return { unavailable: true };
     if (!this.usageWindowsEnabled()) return { disabled: true };
     if (provider === "claude" && token) return this.deps.usageWindows!.claudeTokens?.refresh(token) ?? { unavailable: true };
     if (provider === "claude") return this.deps.usageWindows!.claude?.refresh() ?? { unavailable: true };
-    return this.deps.usageWindows!.windows.refresh();
+    if (provider === "codex") return this.deps.usageWindows!.windows.refresh();
+    return { unavailable: true };
   }
 
   private usageWindowsEnabled(): boolean {

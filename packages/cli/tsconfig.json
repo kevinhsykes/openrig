@@ -18,7 +18,8 @@
       "@openrig/daemon/gateway-protocol": ["../daemon/dist/gateway-protocol-surface.d.ts"],
       "@openrig/daemon/instance-initialization": [
         "../daemon/dist/instance-initialization-surface.d.ts"
-      ]
+      ],
+      "@openrig/daemon/provider-types": ["../daemon/dist/provider-types-surface.d.ts"]
     }
   },
   "include": ["src"],

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import { Command } from "commander";
 import { DaemonClient, DaemonTimeoutError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
+import { KNOWN_PROVIDER_KINDS_LABEL, isKnownProviderKind } from "@openrig/daemon/provider-types";
 import { realDeps } from "./daemon.js";
 import type { StatusDeps } from "./status.js";
 
@@ -408,14 +409,14 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .description("The whole four-block provider read model (accounts, bindings, signals)")
     .option("--json", "Output as parseable JSON")
     .option("--refresh", "First read the Codex login's usage windows and the Claude login's identity natively (up to 35 s here, 75 s with --all-hosts/--hosts; provider.usage_windows is off by default: rig config set provider.usage_windows true)")
-    .option("--provider <p>", "With --refresh, read only this provider (codex|claude)")
+    .option("--provider <p>", `With --refresh, read only this provider (known: ${KNOWN_PROVIDER_KINDS_LABEL})`)
     .option("--claude-token-file <path>", "With --refresh --provider claude, probe this absolute token-file reference on the selected daemon (one model turn; no token value in argv)")
     .option("--credential-label <label>", "Operator label for the selected Claude token file; not provider-observed account identity")
     .option("--all-hosts", "Usage windows across every registered host, as each host already holds them (off by default: rig config set provider.usage_windows true)")
     .option("--hosts <ids>", "Like --all-hosts, for these registered hosts (comma-separated); this host is always included, so --hosts b --refresh also reads this daemon")
     .action(async (opts: { json?: boolean; refresh?: boolean; provider?: string; allHosts?: boolean; hosts?: string; claudeTokenFile?: string; credentialLabel?: string }) => {
-      if (opts.provider !== undefined && opts.provider !== "codex" && opts.provider !== "claude") {
-        console.error(`--provider must be codex or claude (got ${opts.provider})`);
+      if (opts.provider !== undefined && !isKnownProviderKind(opts.provider)) {
+        console.error(`--provider must be a known provider kind (known: ${KNOWN_PROVIDER_KINDS_LABEL}; got ${opts.provider})`);
         process.exitCode = 1;
         return;
       }
@@ -493,7 +494,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       .command(block)
       .description(`The ${block} block of the provider read model`)
       .option("--json", "Output as parseable JSON")
-      .option("--provider <p>", "Filter by provider (codex|claude)")
+      .option("--provider <p>", `Filter by provider (known: ${KNOWN_PROVIDER_KINDS_LABEL})`)
       .option("--account <a>", "Filter by account ref")
       .action(async (opts: { json?: boolean; provider?: string; account?: string }) => {
         const qs = new URLSearchParams();
