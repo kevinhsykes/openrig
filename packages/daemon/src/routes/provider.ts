@@ -12,7 +12,7 @@ import { snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
 import { KNOWN_PROVIDER_KINDS_LABEL, isKnownProviderKind, type ProviderKind } from "../domain/provider/provider-types.js";
-import { claudeConfigRootFor, seatRuntimeHome } from "../domain/seat-runtime-home.js";
+import { claudeSeatConfigDirHooks } from "../domain/provider/claude-seat-switch.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
 import { requireSenderIdentity, resolveRecordedProvenance } from "./require-sender-identity.js";
@@ -64,11 +64,7 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
     },
     tokenRef: (nodeId) => readClaudeSeatTokenRef(rigRepo.db, nodeId),
     setTokenRef: (nodeId, ref) => { rigRepo.setNodeClaudeTokenRef(nodeId, ref); },
-    configDir: (nodeId) => ({ declared: seatRuntimeHome(rigRepo.db, nodeId, "claude-code").home ?? null, effective: claudeConfigRootFor(rigRepo.db, nodeId) }),
-    // The seat's own (member) env, which restore, launch and handover all read through getEffectiveSeatEnv.
-    setConfigDir: (nodeId, dir) => {
-      if (!rigRepo.setNodeEnvVar(nodeId, "CLAUDE_CONFIG_DIR", dir)) throw Object.assign(new Error("the seat's env couldn't be written"), { code: "seat_env_unwritable" });
-    },
+    ...claudeSeatConfigDirHooks(rigRepo),
     snapshot: (rigId, nodeId) => {
       const capture = c.get("snapshotCapture" as never) as SnapshotCapture | undefined;
       if (!capture) return { snapshotId: "(none)", resumes: false, why: "can't be taken: this daemon has no snapshot capture" };

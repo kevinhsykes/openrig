@@ -1,4 +1,6 @@
 import path from "node:path";
+import { claudeConfigRootFor, memberRuntimeHome } from "../seat-runtime-home.js";
+import type { RigRepository } from "../rig-repository.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 import { claudeSeatTokenFileProblem, claudeSeatTokenRefProblem, isClaudeSeatTokenFallback, type ClaudeSeatTokenRef } from "../claude-seat-token.js";
 import { claudeConfigDirPresent, claudeConfigDirProblem, type ClaudeConfigDirProbe } from "./claude-config-dir.js";
@@ -232,4 +234,17 @@ async function moveConfigDir(input: ProviderSwitchInput, relaunch: ClaudeSeatRel
   report.next = `After the seat completes a turn with a tool call, its /status shows the account it uses (the login stored in ${dir}); confirm it is "${input.toAccount}".`;
   return { outcome: "rebind_in_progress", seat: report,
     message: `Relaunched ${input.seat} in its own pane on the config dir ${dir} ("${input.toAccount}"), resuming its conversation. Work in flight when it stopped didn't carry over.` };
+}
+
+/** The seat's config-dir hooks over its stored env, as the route wires them. `declared` is the MEMBER's own `CLAUDE_CONFIG_DIR` (null
+ *  when it declares none), because that is what a rollback writes back into the member's env; a dir only the rig declares is not the
+ *  member's, and restoring it there would shadow the rig. `effective` is the dir the seat resolves to, wherever it is declared. */
+export function claudeSeatConfigDirHooks(rigRepo: Pick<RigRepository, "db" | "setNodeEnvVar">): Pick<ClaudeSeatRelaunch, "configDir" | "setConfigDir"> {
+  return {
+    configDir: (nodeId) => ({ declared: memberRuntimeHome(rigRepo.db, nodeId, "claude-code"), effective: claudeConfigRootFor(rigRepo.db, nodeId) }),
+    // The seat's own (member) env, which restore, launch and handover all read through getEffectiveSeatEnv.
+    setConfigDir: (nodeId, dir) => {
+      if (!rigRepo.setNodeEnvVar(nodeId, "CLAUDE_CONFIG_DIR", dir)) throw Object.assign(new Error("the seat's env couldn't be written"), { code: "seat_env_unwritable" });
+    },
+  };
 }
