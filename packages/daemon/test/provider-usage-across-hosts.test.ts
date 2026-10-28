@@ -211,6 +211,29 @@ const groupFor = (v: UsageAcrossHosts, key: string) => v.items.filter((g) => g.k
 const reads = (hs: UsageHost[]) => hs.map((h) => [h.id, h.codexReads, h.claudeReads]);
 
 describe("GET /api/provider/usage/hosts", () => {
+  it("keeps remote collector readings and rejects malformed collector identities", async () => {
+    const row: ProviderUsageAllowance = {
+      ...codexRow(null, null), provider: "zai",
+      source: { kind: "quota_collector_file", host: "local" },
+      identity: { provider: "zai", rail: "zai", window: "weekly", source: "fixture-collector", recordState: "AVAILABLE", unknown: null },
+    };
+    const rewrite = (usage: unknown[]) => (route: string, body: unknown) =>
+      route === "/api/provider/status" ? { ...(body as object), usage } : body;
+    const a = await host("collector-a", { rewrite: rewrite([row]) });
+    const b = await host("collector-b", { rewrite: rewrite([row]) });
+    const bad = await host("collector-bad", { rewrite: rewrite([{ ...row, identity: { ...row.identity, rail: "another-rail" } }]) });
+    const hub = await host("hub", { registry: [a.entry(), b.entry(), bad.entry()] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    const groups = groupFor(body, "rail:zai:weekly");
+    expect(groups).toHaveLength(2);
+    expect(groups.map((g) => g.observations[0]!.hostId)).toEqual(["collector-a", "collector-b"]);
+    expect(groups.every((g) => g.linkage === "unknown" && g.observations.length === 1)).toBe(true);
+    expect(body.hosts.find((h) => h.hostId === "collector-bad")?.usage).toBe("unavailable");
+    expect(isUsageRow({ ...row, source: { kind: "codex_app_server", host: "local" } })).toBe(false);
+    expect(isUsageRow({ ...row, identity: null })).toBe(false);
+  });
+
   it("one allowance on two hosts appears once, with each host's own served row and the time it was read", async () => {
     const a = await host("a", { now: () => NOW });
     const b = await host("b", { now: () => NOW, codex: { secondaryUsed: 75 } });
