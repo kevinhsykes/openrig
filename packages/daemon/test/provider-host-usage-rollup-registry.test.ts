@@ -69,6 +69,39 @@ describe("host usage rollup registry", () => {
     expect(rows[1]!.state).toBe("explicit_unknown"); // codex's own normal row, unharmed
   });
 
+  it("DEFAULT_HOST_USAGE_ROLLUPS and its entries are frozen at runtime, not just readonly in types", () => {
+    expect(Object.isFrozen(DEFAULT_HOST_USAGE_ROLLUPS)).toBe(true);
+    for (const entry of DEFAULT_HOST_USAGE_ROLLUPS) {
+      expect(Object.isFrozen(entry)).toBe(true);
+    }
+  });
+
+  it("a push onto the frozen defaults throws (modules are strict) and the defaults are unchanged", () => {
+    const attemptPush = (list: HostUsageRollup[]) => list.push({ provider: "evil", rollup: () => null });
+    expect(() => attemptPush(DEFAULT_HOST_USAGE_ROLLUPS as HostUsageRollup[])).toThrow(TypeError);
+    expect(DEFAULT_HOST_USAGE_ROLLUPS.map((r) => r.provider)).toEqual(["claude", "codex"]);
+  });
+
+  it("hostUsageRollupsWith() still returns a fresh, unfrozen, caller-owned list over the frozen defaults", () => {
+    const list = hostUsageRollupsWith();
+    expect(list).not.toBe(DEFAULT_HOST_USAGE_ROLLUPS);
+    expect(Object.isFrozen(list)).toBe(false);
+    expect(list.map((r) => r.provider)).toEqual(["claude", "codex"]);
+    // Mutating the caller-owned copy never reaches the global.
+    list.push({ provider: "zai", rollup: () => zaiRow(NOW) });
+    expect(DEFAULT_HOST_USAGE_ROLLUPS).toHaveLength(2);
+  });
+
+  it("rollupHostUsage refuses a raw list with duplicate providers — same text, before any rollup runs", () => {
+    const codexEntry = DEFAULT_HOST_USAGE_ROLLUPS.find((r) => r.provider === "codex")!;
+    let ran = false;
+    const spy: HostUsageRollup = { provider: "codex", rollup: () => { ran = true; return null; } };
+    expect(() => rollupHostUsage(input, [codexEntry, spy])).toThrow(
+      /duplicate host usage rollup registered for provider "codex"/,
+    );
+    expect(ran).toBe(false);
+  });
+
   it("a non-Error throw is stringified into the row's reason, never propagated", () => {
     const bomb: HostUsageRollup = {
       provider: "claude",
