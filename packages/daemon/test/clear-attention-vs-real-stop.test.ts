@@ -91,7 +91,7 @@ describe("real clearAttention vs real checked stop (P20c)", () => {
       }
       expect(stopped).toMatchObject({ ok: true });
       expect(registry.getBindingForNode(node.id)).toBeNull();   // RED unfenced in the first order: the stale binding is back
-      expect(effects).toEqual(["detach", "kill"].filter(e => effects.includes(e)));
+      expect(effects).toEqual(["detach", "kill"]);   // exactly the stop's two tmux effects, once each, in order; clearAttention adds none
       expect((db.prepare("SELECT status FROM sessions WHERE id=?").get(session.id) as { status: string }).status).toBe("exited");
     } finally { db.close(); }
   });

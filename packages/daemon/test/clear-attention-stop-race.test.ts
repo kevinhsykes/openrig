@@ -25,6 +25,19 @@ function seat() {
     evidence: { registeredPane: "%1", observedPid: 100, observedCommand: "bash", matchedLayer: null } });
   return { db, registry, eventBus, node, name, session };
 }
+// The repair case: the daemon's identity verdict is pane_missing because no pane was ever recorded (registeredPane null),
+// and the binding has no pane (or no binding row at all). That is the only way the identity branch of clearAttention is
+// active without a recorded pane (seat-attention-reconciler.ts getActiveIdentityVerdict: registeredPane must equal the
+// binding's pane, null === null here), and it is what `rig reconcile-session --repair-missing-pane` points at.
+function seatWithoutRecordedPane(dropBindingRow: boolean) {
+  const s = seat();
+  s.registry.clearBinding(s.node.id);
+  if (!dropBindingRow) s.registry.updateBinding(s.node.id, { attachmentType: "tmux", tmuxSession: s.name });   // a row, no pane
+  new SeatIdentityStore(s.db).upsert({ nodeId: s.node.id, sessionName: s.name, verdict: "pane_missing", evidenceSource: "pane_process",
+    reason: "pane_missing", observedAt: new Date().toISOString(),
+    evidence: { registeredPane: null, observedPid: null, observedCommand: null, matchedLayer: null } } as never);
+  return s;
+}
 const startedAt = "Fri Oct 9 12:00:00 2026";
 const listProcesses = async () => [
   { pid: 100, ppid: 1, pgid: 100, tpgid: 101, executableName: "bash", command: "bash", startedAt },
@@ -94,9 +107,42 @@ describe("currentBindingGuard (the shared fence for binding writes that follow a
       expect(result.ok).toBe(false);
     } finally { s.db.close(); }
   });
-  it("a node with no binding at capture time never passes", () => {
+  it("a node with no binding at capture passes while it stays unbound, and fails once anything binds it (P20e)", () => {
     const s = seat(); s.registry.clearBinding(s.node.id);
-    try { expect(currentBindingGuard(s.registry, s.node.id)()).toBe(false); } finally { s.db.close(); }
+    try {
+      const still = currentBindingGuard(s.registry, s.node.id);
+      expect(still()).toBe(true);   // RED if "no binding" never passes: the repair path below would stop working
+      s.registry.updateBinding(s.node.id, { tmuxSession: s.name, tmuxPane: "%3" });
+      expect(still()).toBe(false);  // a binding made meanwhile by another operation is not overwritten
+    } finally { s.db.close(); }
+  });
+  it("null and undefined binding fields compare equal; a different value does not (explicit field comparison)", () => {
+    const s = seat();
+    try {
+      const still = currentBindingGuard(s.registry, s.node.id);
+      expect(still()).toBe(true);
+      s.registry.updateBinding(s.node.id, { tmuxSession: s.name, tmuxPane: "%1" });   // the same tuple written again
+      expect(still()).toBe(true);
+      s.registry.updateBinding(s.node.id, { tmuxSession: s.name, tmuxPane: "%2" });
+      expect(still()).toBe(false);
+    } finally { s.db.close(); }
+  });
+  it.each([["a binding row with no pane", false], ["no binding row at all", true]])("clearAttention repairs a seat whose pane was never recorded (%s), as it did at 6863aadf2", async (_l, dropRow) => {
+    const s = seatWithoutRecordedPane(dropRow);
+    try {
+      const result = await reconciler(s).clearAttention(s.name);
+      expect(s.registry.getBindingForNode(s.node.id)?.tmuxPane).toBe("%7");   // the live pane was recorded
+      expect(result).toMatchObject({ ok: true });
+    } finally { s.db.close(); }
+  });
+  it("...but not over a binding that another operation made while clearAttention was reading", async () => {
+    const s = seatWithoutRecordedPane(true);
+    try {
+      const bindElsewhere = () => s.registry.updateBinding(s.node.id, { attachmentType: "tmux", tmuxSession: s.name, tmuxPane: "%9" });
+      const result = await reconciler(s, bindElsewhere).clearAttention(s.name);
+      expect(s.registry.getBindingForNode(s.node.id)?.tmuxPane).toBe("%9");   // the other operation's binding survives
+      expect(result.ok).toBe(false);
+    } finally { s.db.close(); }
   });
   it("a node with no session never passes", () => {
     const s = seat();
