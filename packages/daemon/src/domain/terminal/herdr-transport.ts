@@ -52,6 +52,9 @@ export interface HerdrTransport {
 
 export type HerdrTransportFactory = () => HerdrTransport;
 
+/** A definite provider refusal (herdr answered with an error), unlike a timeout or a lost or malformed response. */
+export class HerdrResponseError extends Error {}
+
 /** Resolve the herdr control socket path: env override → per-session → default. */
 export function resolveHerdrSocketPath(env: NodeJS.ProcessEnv = process.env): string {
   if (env["HERDR_SOCKET_PATH"]) return env["HERDR_SOCKET_PATH"] as string;
@@ -78,7 +81,7 @@ export function unwrapHerdrResponse(raw: unknown): HerdrResult {
     const obj = raw as Record<string, unknown>;
     if (obj["error"] != null) {
       const e = obj["error"];
-      throw new Error(`herdr error: ${typeof e === "string" ? e : JSON.stringify(e)}`);
+      throw new HerdrResponseError(`herdr error: ${typeof e === "string" ? e : JSON.stringify(e)}`);
     }
     const result = obj["result"];
     if (result && typeof result === "object") return result as HerdrResult;

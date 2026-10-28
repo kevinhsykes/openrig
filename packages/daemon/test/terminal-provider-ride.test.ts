@@ -46,6 +46,7 @@ import {
 } from "../src/domain/terminal/herdr-adapter.js";
 import {
   createHerdrSocketTransport,
+  HerdrResponseError,
   resolveHerdrSocketPath,
   parseHerdrVersion,
   unwrapHerdrResponse,
@@ -538,7 +539,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
     const { transport, requests } = fakeSocketTransport({
       respond: async (method, params) => {
         if (method === "workspace.create") {
-          if ((params as Record<string, unknown>)["label"] != null) throw new Error("unknown param: label");
+          if ((params as Record<string, unknown>)["label"] != null) throw new HerdrResponseError("unknown param: label");
           return { type: "workspace_created", workspace_id: "wH" };
         }
         return { type: "layout_apply" };
@@ -558,7 +559,7 @@ describe("herdr adapter — socket ping probe + workspace.create → layout.appl
   it("total workspace.create failure degrades EVERY pane honestly (herdr_workspace_failed)", async () => {
     const { transport } = fakeSocketTransport({
       respond: async (method) => {
-        if (method === "workspace.create") throw new Error("boom");
+        if (method === "workspace.create") throw new HerdrResponseError("boom");
         return { type: "layout_apply" };
       },
     });
