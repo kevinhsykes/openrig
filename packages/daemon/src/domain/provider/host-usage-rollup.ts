@@ -92,6 +92,9 @@ export function rollupHostUsage(
   input: HostUsageRollupInput,
   rollups: readonly HostUsageRollup[] = DEFAULT_HOST_USAGE_ROLLUPS,
 ): HostUsageRow[] {
+  // A duplicate in the list it is handed (raw or built) is a programming error: fail loudly
+  // BEFORE any rollup runs — never as a mid-rollup failure row, which is a different contract.
+  validateNoDuplicateRollups(rollups);
   const rows: HostUsageRow[] = [];
   for (const entry of rollups) {
     try {
@@ -124,24 +127,31 @@ export interface HostUsageRollup {
   rollup(input: HostUsageRollupInput): HostUsageRow | null;
 }
 
-const claudeRollup: HostUsageRollup = { provider: "claude", rollup: rollupClaude };
-const codexRollup: HostUsageRollup = { provider: "codex", rollup: rollupCodex };
+const claudeRollup: HostUsageRollup = Object.freeze({ provider: "claude", rollup: rollupClaude });
+const codexRollup: HostUsageRollup = Object.freeze({ provider: "codex", rollup: rollupCodex });
 
-/** The shipped registry, in today's output order. Never mutated: later patches add rollups via
- *  hostUsageRollupsWith and pass the built list to rollupHostUsage. */
-export const DEFAULT_HOST_USAGE_ROLLUPS: readonly HostUsageRollup[] = [claudeRollup, codexRollup];
+/** The shipped registry, in today's output order. Deep-frozen (the array AND each entry): `readonly`
+ *  alone is compile-time only, and a runtime push here would bypass duplicate validation. Later
+ *  patches add rollups via hostUsageRollupsWith and pass the built list to rollupHostUsage. */
+export const DEFAULT_HOST_USAGE_ROLLUPS: readonly HostUsageRollup[] = Object.freeze([claudeRollup, codexRollup]);
 
-/** The default list plus `extras`, validated AT REGISTRATION: a duplicate provider throws here —
- *  never mid-rollup, where it would take the read model's callers with it. Returns a fresh array;
- *  nothing global is mutated. */
-export function hostUsageRollupsWith(extras: readonly HostUsageRollup[] = []): HostUsageRollup[] {
+/** The registration contract, shared by the builder and rollupHostUsage: two entries for one
+ *  provider throw AT REGISTRATION — never mid-rollup, where it would take the read model's
+ *  callers with it. */
+function validateNoDuplicateRollups(rollups: readonly HostUsageRollup[]): void {
   const seen = new Set<ProviderKind>();
-  for (const entry of [...DEFAULT_HOST_USAGE_ROLLUPS, ...extras]) {
+  for (const entry of rollups) {
     if (seen.has(entry.provider)) {
       throw new Error(`duplicate host usage rollup registered for provider "${entry.provider}"`);
     }
     seen.add(entry.provider);
   }
+}
+
+/** The default list plus `extras`, validated at registration. Returns a fresh, unfrozen,
+ *  caller-owned array; nothing global is mutated. */
+export function hostUsageRollupsWith(extras: readonly HostUsageRollup[] = []): HostUsageRollup[] {
+  validateNoDuplicateRollups([...DEFAULT_HOST_USAGE_ROLLUPS, ...extras]);
   return [...DEFAULT_HOST_USAGE_ROLLUPS, ...extras];
 }
 
