@@ -157,6 +157,8 @@ export class QuotaCollectorUsage {
   }
 
   private async loadFile(): Promise<FileState> {
+    // `at` is the READ time. It becomes each engine's `lastRefresh.at`; the file's own `updated_at` is only `fileUpdatedAt` in the summary,
+    // and each window ages from its own `observed_at`.
     const at = this.now();
     const fail = (reason: string, detail: string): FileState => ({ ok: false, at, reason, detail });
     let body: string;

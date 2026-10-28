@@ -376,6 +376,8 @@ export interface SignInFact {
 }
 
 export interface UsageRefreshOutcome {
+  /** When the read ran. For a quota-collector row this is when the FILE was read, not the file's own `updated_at` (that is
+   *  `QuotaCollectorSummary.fileUpdatedAt`), and not when a window was measured: freshness ages from each window's own `observedAt`. */
   at: string;
   outcome: "ok" | "failed";
   reason?: string;

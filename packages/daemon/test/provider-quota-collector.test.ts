@@ -73,6 +73,10 @@ describe("fresh readings", () => {
     expect(windowRow(rows, "zai", "mcp-tools").windows[0]).toMatchObject({ usedPercent: 1 });
     // The file's store key differs from the rail id for some rails: the row is the rail, the identity keeps the file's key.
     expect(windowRow(rows, "ollama_cloud", "session").identity).toMatchObject({ rail: "ollama_cloud", provider: "ollama-cloud" });
+    // `lastRefresh.at` is the time the FILE was read, not the file's updated_at and not a window's observed_at; staleness comes from the windows.
+    expect(five.lastRefresh).toMatchObject({ outcome: "ok", at: FRESH_NOW });
+    expect(c.summary()).toMatchObject({ readAt: FRESH_NOW, fileUpdatedAt: "2026-10-27T21:42:43Z" });
+    expect(five.windows[0]!.observedAt).toBe("2026-10-27T21:42:10.373723+00:00");
     // One reading per window, keyed by rail and window: a second read replaces, never duplicates.
     await c.refreshAll();
     expect(rowsOf(c.project(FRESH_NOW), "zai")).toHaveLength(3);
@@ -437,7 +441,7 @@ describe("through the service and routes", () => {
     return a;
   }
 
-  it("the routes accept a registered rail and still refuse an unregistered one naming the list; cross-host refresh stays codex and claude", async () => {
+  it("the routes accept a registered rail and refuse an unregistered one naming the live list, including across hosts", async () => {
     registerProviderKinds(["zai"]);
     const svc = service(true);
     const ok = await app(svc).request("/api/provider/usage/refresh", { method: "POST", body: JSON.stringify({ provider: "zai" }) });
@@ -447,10 +451,35 @@ describe("through the service and routes", () => {
     const bad = await app(svc).request("/api/provider/usage/refresh", { method: "POST", body: JSON.stringify({ provider: "nope" }) });
     expect(bad.status).toBe(400);
     expect(String((await bad.json()).error)).toContain("codex, claude, zai");
-    const hosts = await app(svc).request("/api/provider/usage/hosts/refresh", { method: "POST", body: JSON.stringify({ provider: "zai" }) });
-    expect(hosts.status).toBe(400);
-    const text = String((await hosts.json()).error);
-    expect(text).toContain("codex, claude");
-    expect(text).not.toContain("zai,");
+    // Across hosts the same live list applies, so what `status` calls known is not refused there with a different list.
+    const hostsBad = await app(svc).request("/api/provider/usage/hosts/refresh", { method: "POST", body: JSON.stringify({ provider: "nope" }) });
+    expect(hostsBad.status).toBe(400);
+    expect(String((await hostsBad.json()).error)).toContain("codex, claude, zai");
+    const hostsNonString = await app(svc).request("/api/provider/usage/hosts/refresh", { method: "POST", body: JSON.stringify({ providers: ["zai", 42] }) });
+    expect(hostsNonString.status).toBe(400);
+    expect(String((await hostsNonString.json()).error)).toContain("(got 42)");
+  });
+
+  it("a cross-host refresh of a collector rail refreshes this host's feed, and each remote host's leg is a NAMED failure before any request", async () => {
+    registerProviderKinds(["zai"]);
+    const fetchImpl = vi.fn(async () => { throw new Error("no network in this test"); });
+    const a = new Hono();
+    a.use("*", async (c, next) => {
+      c.set("providerService" as never, service(true));
+      c.set("hostRegistryLoader" as never, () => ({ ok: true, registry: { hosts: [{ id: "remote-a", transport: "http", url: "http://remote-a.invalid:7433" }] } }));
+      c.set("remoteFetchImpl" as never, fetchImpl);
+      await next();
+    });
+    a.route("/api/provider", providerRoutes());
+    const res = await a.request("/api/provider/usage/hosts/refresh", { method: "POST", body: JSON.stringify({ provider: "zai" }) });
+    expect(res.status).toBe(200);
+    const { refresh } = await res.json() as { refresh: Array<Record<string, unknown>> };
+    const local = refresh.find((l) => l.hostId === "local")!;
+    const remote = refresh.find((l) => l.hostId === "remote-a")!;
+    expect(local).toMatchObject({ provider: "zai", outcome: "ok" });
+    expect(remote).toMatchObject({ provider: "zai", outcome: "failed", reason: "provider_has_no_reader" });
+    expect(String(remote.detail)).toContain('provider kind "zai"');
+    // The refresh leg itself sent nothing to the remote host (the view's own read of it may).
+    expect(fetchImpl.mock.calls.every(([url]) => !String(url).includes("/usage/refresh"))).toBe(true);
   });
 });

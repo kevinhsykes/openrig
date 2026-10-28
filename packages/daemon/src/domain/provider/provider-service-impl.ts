@@ -151,7 +151,9 @@ export class ProviderServiceImpl implements ProviderService {
       ],
       now: () => asOf,
     });
-    // Slice 01: memory only. A read never starts a native probe (the wake ladder reads this every tick).
+    // Slice 01: Codex and Claude rows are memory only; a read never starts a native probe (the wake ladder reads this every tick).
+    // The quota-collector feed is the one exception: `refreshIfStale` above awaits a local read of its file, at most once per 30 s,
+    // capped at 8 MiB, with failures recorded on its rows and never thrown. That is a file read, not a probe.
     const usage = this.usageWindowsEnabled() ? this.deps.usageWindows!.windows.project(asOf) : null;
     if (!usage) return model;
     // The read covers only the login active in the daemon's CODEX_HOME: say so whenever saved rig auth
