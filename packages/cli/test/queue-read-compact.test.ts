@@ -101,13 +101,17 @@ describe("queue show and transitions (output.compact, P2/P3)", () => {
   const transitionsRoute = (data: unknown = LOG) => ({ [`GET /api/queue/${ID}/transitions`]: { status: 200, data } });
 
   describe("P2 queue show", () => {
-    it("switch off: today's preview, every field kept, no notice", async () => {
+    it("switch off: today's preview, every field kept; the bounded-preview note rides stderr in JSON mode too (P8)", async () => {
       vi.stubEnv("OPENRIG_OUTPUT_COMPACT", "0");
       const out = JSON.parse(await run(["show", ID, "--json"], showRoute()));
       expect(out).toHaveProperty("tier", null);
       expect(out).toHaveProperty("evidenceRef", null);
       expect(out.readView.complete).toBe(false); // the body preview, as today
-      expect(errors).toEqual([]);
+      // P8: the cut body now announces itself on stderr in JSON mode as well — same one-line
+      // note as text mode; stdout stays one JSON document and the record fields are unchanged.
+      expect(errors).toHaveLength(1);
+      expect(errors[0]).toContain("bounded preview — complete body is");
+      expect(errors[0]).toContain(`rig queue show '${ID}' --full --json`);
     });
 
     it("switch on: status fields and body marker kept, empty fields left out and counted, the full read named", async () => {
