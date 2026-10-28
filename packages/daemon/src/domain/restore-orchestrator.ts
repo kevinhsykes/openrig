@@ -49,7 +49,7 @@ import type {
 import { AppliedLaunchObservationStore } from "./applied-launch-observation-store.js";
 import { classifyPaneRuntimeMatch } from "./seat-identity-reconciler.js";
 import { isShellForeground } from "./shell-classifier.js";
-import { rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
+import { currentBindingGuard, rebindAndVerifyPaneIdentity } from "./seat-attention-reconciler.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { validatePreRestore } from "./restore-preconditions.js";
 import { resolveSnapshotRestoreTopology } from "./restore-topology.js";
@@ -2426,6 +2426,8 @@ export class RestoreOrchestrator {
       requireExactResumeLineage: true,
       resumeRotation: rotation,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
+      // reconcileNodeRuntimeTruth runs from the clear-attention route without the node's lease (P20c).
+      assertCurrent: currentBindingGuard(this.sessionRegistry, nodeId),
     });
     if (!identity.ok) {
       return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };

@@ -131,6 +131,24 @@ async function describeLineageFailure(input: {
 
 /** Rebind one managed seat to the sole pane currently in its named tmux
  * session and positively identify its declared agent runtime. */
+/** A binding write that follows awaited reads must still be about the seat it read. Captures the node's latest session
+ * now; the returned check holds only while that session is still the latest, has not ended, and the node still has a
+ * binding row. A checked stop's final transaction marks the session exited and clears the binding, and a handover or
+ * launch mints a newer session, so each makes a late write refuse instead of restoring a stale binding (P20b/P20c).
+ * The check and the write that follows it run in one synchronous turn, as the stop's final transaction does, so one
+ * of them always sees the other. This is the fence for paths that do not hold the per-node lifecycle lease. */
+export function currentBindingGuard(sessionRegistry: SessionRegistry, nodeId: string): () => boolean {
+  const latest = () => sessionRegistry.db.prepare(
+    "SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+  ).get(nodeId) as { id: string; status: string } | undefined;
+  const started = latest()?.id ?? null;
+  return () => {
+    const now = latest();
+    return started !== null && now?.id === started && !["exited", "detached", "superseded"].includes(now.status)
+      && sessionRegistry.getBindingForNode(nodeId) != null;
+  };
+}
+
 export async function rebindAndVerifyPaneIdentity(input: {
   db: Database.Database;
   sessionRegistry: SessionRegistry;
@@ -544,6 +562,9 @@ export class SeatAttentionReconciler {
         runtime: session.runtime,
         expectedResumeToken: session.resumeToken,
         listProcesses: this.deps.listProcesses,
+        // This route does not hold the per-node lease (a draft-aware seat would refuse it, and it would wait out a whole
+        // stop): the write is conditional on the seat still being the one read instead.
+        assertCurrent: currentBindingGuard(sessionRegistry, session.nodeId),
       });
       if (!identity.ok) {
         return {
