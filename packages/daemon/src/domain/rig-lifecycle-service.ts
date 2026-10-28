@@ -74,7 +74,7 @@ export type RemoveNodeResult =
     }
   | {
       ok: false;
-      code: "rig_not_found" | "node_not_found" | "active_qitems" | "fallback_not_running" | "fallback_in_target" | "kill_failed";
+      code: "rig_not_found" | "node_not_found" | "active_qitems" | "fallback_not_running" | "fallback_in_target" | "fallback_unroutable" | "kill_failed";
       error: string;
       activeQitemIds?: string[];
       fallbackDestination?: string;
@@ -140,7 +140,7 @@ export type ShrinkPodResult =
     }
   | {
       ok: false;
-      code: "rig_not_found" | "pod_not_found" | "active_qitems" | "fallback_not_running" | "fallback_in_target" | "kill_failed";
+      code: "rig_not_found" | "pod_not_found" | "active_qitems" | "fallback_not_running" | "fallback_in_target" | "fallback_unroutable" | "kill_failed";
       error: string;
       activeQitemIds?: string[];
       fallbackDestination?: string;
