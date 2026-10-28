@@ -39,7 +39,7 @@ import type { AgentActivity } from "./types.js";
 import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
-import { isBoundTerminalSeat, terminalSeatExpectsAgent } from "./terminal-seat.js";
+import { isBareTerminalSeat, isBoundTerminalSeat, terminalSeatExpectsAgent, terminalSeatHostsAgent } from "./terminal-seat.js";
 import { resolveGuardTarget } from "./seat-delivery-guard.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -2381,7 +2381,8 @@ export class SessionTransport {
     // segment must never edit a line of the exact text.
     if (opts?.exactText !== undefined && !opts.dangerouslyInteract) {
       const { exactText, ...rest } = opts;
-      if (!isBoundTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
+      // An agent seat declared runtime terminal (P27) wants the envelope like any agent; a shell or TUI gets the exact text.
+      if (!isBareTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
       return { ...(await this.send(sessionName, exactText, { ...rest, stampISO: undefined, typedExactly: true })), envelopeOmitted: true };
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
@@ -2417,7 +2418,8 @@ export class SessionTransport {
     const target = resolveGuardTarget(this.db, sessionName);
     if (!target?.pane) return null;
     const node = this.db.prepare("SELECT logical_id AS logicalId FROM nodes WHERE id = ?").get(target.nodeId) as { logicalId: string } | undefined;
-    if (!node || !terminalSeatExpectsAgent(this.db, (nodeId) => this.rigRepo.getNodeLaunchRecipe(nodeId), { id: target.nodeId, logicalId: node.logicalId })) return null;
+    // P27: a seat recorded as holding an agent gets the same live check as one whose startup launches an agent; the record can be old.
+    if (!node || !(terminalSeatHostsAgent(this.db, sessionName) || terminalSeatExpectsAgent(this.db, (nodeId) => this.rigRepo.getNodeLaunchRecipe(nodeId), { id: target.nodeId, logicalId: node.logicalId }))) return null;
     const pane = target.pane;
     // Everything above is synchronous, so a send to any other seat starts its first tmux call in the same turn as before.
     return (async () => {

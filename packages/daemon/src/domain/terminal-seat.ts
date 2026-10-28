@@ -5,17 +5,54 @@ import { resolveGuardTarget } from "./seat-delivery-guard.js";
  * plus a binding to the actual tmux address. Historical rows and unbound
  * canonical names alone do not establish what is receiving this input. */
 export function isBoundTerminalSeat(db: Database.Database, sessionName: string): boolean {
+  return boundTerminalNode(db, sessionName) !== null;
+}
+
+function boundTerminalNode(db: Database.Database, sessionName: string): { nodeId: string; pane: string | null } | null {
   try {
     const target = resolveGuardTarget(db, sessionName);
-    if (!target) return false;
+    if (!target) return null;
     const current = db.prepare(
-      `SELECT n.runtime AS runtime FROM nodes n JOIN bindings b ON b.node_id = n.id
+      `SELECT n.runtime AS runtime, b.tmux_pane AS pane FROM nodes n JOIN bindings b ON b.node_id = n.id
         WHERE n.id = ? AND (b.tmux_session = ? OR b.tmux_pane = ?)`,
-    ).get(target.nodeId, sessionName, sessionName) as { runtime: string | null } | undefined;
-    return current?.runtime === "terminal";
+    ).get(target.nodeId, sessionName, sessionName) as { runtime: string | null; pane: string | null } | undefined;
+    return current?.runtime === "terminal" ? { nodeId: target.nodeId, pane: current.pane } : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * P27: pane commands that mean an AGENT holds the pane of a `runtime: terminal` seat. On KPC the Pi agents (and the other
+ * harness agents) are declared runtime terminal and started by a startup action, so the runtime says nothing about them.
+ * An explicit allowlist, not "anything that is not a shell": the human's TUI (`rig tui`) runs as `node`, and typing a wake
+ * into it is what #1100 prevents. A command that is not listed here is treated as bare, so a new harness has to be added.
+ */
+export const AGENT_PANE_COMMANDS: ReadonlySet<string> = new Set(["pi", "command-code", "vibe", "claude", "codex"]);
+
+/**
+ * P27: whether a bound terminal seat hosts an agent, by what the daemon last RECORDED as holding its current pane
+ * (seat_identity_verdicts.observed_command). The seat's startup record is deliberately not used: the human's TUI has a
+ * fresh-start action too. No record, a record for another pane, an unlisted command or an unreadable database all read as
+ * "no agent". The record can be old, so a send still re-checks the live pane (see SessionTransport.terminalAgentNotRunning).
+ */
+export function terminalSeatHostsAgent(db: Database.Database, sessionName: string): boolean {
+  try {
+    const node = boundTerminalNode(db, sessionName);
+    if (!node) return false;
+    const row = db.prepare("SELECT observed_command AS command, registered_pane AS pane FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(node.nodeId) as { command: string | null; pane: string | null } | undefined;
+    if (!row?.command) return false;
+    if (row.pane && node.pane && row.pane !== node.pane) return false;
+    return AGENT_PANE_COMMANDS.has(row.command.trim().replace(/^-/, "").toLowerCase());
   } catch {
     return false;
   }
+}
+
+/** A bound terminal seat with no agent in it: typed text there would run as a command line (or land in a TUI). */
+export function isBareTerminalSeat(db: Database.Database, sessionName: string): boolean {
+  return isBoundTerminalSeat(db, sessionName) && !terminalSeatHostsAgent(db, sessionName);
 }
 
 type StartupActionsLike = ReadonlyArray<{ appliesOn?: readonly string[] }> | undefined;

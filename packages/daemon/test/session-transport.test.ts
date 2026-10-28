@@ -2838,6 +2838,46 @@ describe("SessionTransport", () => {
     expect(sent).toEqual([HEREDOC]);
   });
 
+  // P27: a Pi/agent seat is declared runtime `terminal` and launched through a harness. What holds its pane is recorded
+  // (seat_identity_verdicts.observed_command). An agent there wants the envelope; a shell or the human's TUI does not.
+  function recordPane(command: string | null, pane = "%1") {
+    const node = db.prepare("SELECT id FROM nodes WHERE logical_id = 'infra.ui'").get() as { id: string };
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig", tmuxPane: pane });
+    db.prepare("INSERT OR REPLACE INTO seat_identity_verdicts (node_id, verdict, observed_command, registered_pane, session_name, observed_at) VALUES (?, 'verified', ?, ?, 'infra-ui@term-rig', ?)")
+      .run(node.id, command, pane, new Date().toISOString());
+  }
+
+  it("P27: a terminal seat whose pane is recorded as a known agent (pi) gets the envelope, not the exact text", async () => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "pi", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBeUndefined();
+    expect(sent).toEqual([H_ENVELOPE]);
+  });
+
+  it.each([["node"], ["bash"], [null], ["some-unknown-tool"]])("P27: a terminal seat recorded as %s (a TUI, a shell, nothing, unknown) still gets exactText", async (command) => {
+    seedTerminalSeat();
+    recordPane(command);
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result.envelopeOmitted).toBe(true);
+    expect(sent).toEqual([HEREDOC]);
+  });
+
+  it("P27: an agent seat whose pane has fallen back to a bare shell is held, whatever was recorded", async () => {
+    seedTerminalSeat();
+    recordPane("pi");   // the record is old; the live pane is at zsh now
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "terminal_agent_not_running" });
+    expect(sent).toEqual([]);
+  });
+
   it("send to an agent seat ignores exactText and keeps the envelope", async () => {
     seedCanonicalRig();
     const sent: string[] = [];
