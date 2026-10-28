@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { RigRepository } from "../src/domain/rig-repository.js";
 import { seatRuntimeHome, claudeConfigRootFor } from "../src/domain/seat-runtime-home.js";
 import { createFullTestDb } from "./helpers/test-app.js";
+import { claudeSeatOf } from "../src/routes/provider.js";
+import type { Context } from "hono";
 
 // A seat's own CLAUDE_CONFIG_DIR lives in its member `env:` (nodes.env_json), the one place launch, restore and handover read
 // through getEffectiveSeatEnv. `setNodeEnvVar` writes one variable there and leaves the rest, so moving a seat between accounts
@@ -19,6 +21,20 @@ function fixture() {
 }
 
 describe("RigRepository.setNodeEnvVar", () => {
+  it("the provider route restores an inherited config dir without pinning it into the member", () => {
+    const { repo, rig, node } = fixture();
+    repo.setRigEnv(rig.id, { CLAUDE_CONFIG_DIR: "/rig/before" });
+    const lifecycle = claudeSeatOf({ get: () => repo } as unknown as Context);
+    const before = lifecycle.configDir!(node.id);
+    expect(before).toEqual({ declared: null, effective: "/rig/before" });
+    lifecycle.setConfigDir!(node.id, "/other-account");
+    lifecycle.setConfigDir!(node.id, before.declared);
+    repo.setRigEnv(rig.id, { CLAUDE_CONFIG_DIR: "/rig/after" });
+    expect(lifecycle.configDir!(node.id)).toEqual({ declared: null, effective: "/rig/after" });
+    expect(repo.getEffectiveSeatEnv(node.id)).toMatchObject({ KEEP_ME: "1" });
+    repo.setNodeEnvVar(node.id, "CLAUDE_CONFIG_DIR", "/member");
+    expect(lifecycle.configDir!(node.id)).toEqual({ declared: "/member", effective: "/member" });
+  });
   it("sets one variable in the member's env, keeping the others, and the seat's launch reads it", () => {
     const { db, repo, node } = fixture();
     expect(repo.setNodeEnvVar(node.id, "CLAUDE_CONFIG_DIR", "/home/test/.claude-max")).toBe(true);

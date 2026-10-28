@@ -9,7 +9,7 @@ import {
   type CollectorQuotaIdentity, type ProviderUsageAllowance,
 } from "../src/domain/provider/provider-types.js";
 import { PROVIDER_QUOTA_FILE_ENV, PROVIDER_RAILS_FILE_ENV, parseAllowedRails, registerAllowedRailsFromEnv, type AllowedRail } from "../src/domain/provider/provider-rails.js";
-import { COLLECTOR_SIGN_IN_EVIDENCE, QuotaCollectorUsage, QUOTA_FILE_SCHEMA, quotaCollectorFromEnv, sliceRail } from "../src/domain/provider/quota-collector-usage.js";
+import { COLLECTOR_SIGN_IN_EVIDENCE, QuotaCollectorUsage, QUOTA_FILE_SCHEMA, QUOTA_FILE_MAX_BYTES, QUOTA_READ_TIMEOUT_MS, quotaCollectorFromEnv, sliceRail } from "../src/domain/provider/quota-collector-usage.js";
 import { signalEligibleForAutomation } from "../src/domain/provider/provider-policy.js";
 import { allowanceKey, crossHostLinkKey, groupUsageAcrossHosts } from "../src/domain/provider/usage-across-hosts.js";
 import { CodexUsageWindows } from "../src/domain/provider/codex-usage-windows.js";
@@ -33,7 +33,7 @@ const RAILS: AllowedRail[] = [
 const FRESH_NOW = "2026-10-27T21:43:00.000Z";
 
 const cleanup: Array<() => void> = [];
-afterEach(() => { for (const f of cleanup.splice(0)) f(); resetRegisteredProviderKinds(); vi.restoreAllMocks(); });
+afterEach(() => { for (const f of cleanup.splice(0)) f(); resetRegisteredProviderKinds(); vi.restoreAllMocks(); vi.useRealTimers(); });
 
 function fileWith(content: unknown | string): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "quota-collector-"));
@@ -293,9 +293,44 @@ describe("advisory only, by structure: collector readings are usage rows and nev
 });
 
 describe("one read of the file per refresh", () => {
+  it("bounds a stalled open and reports unavailable instead of hanging status", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(fs.promises, "open").mockImplementation(() => new Promise<never>(() => {}));
+    const c = collector(FIXTURE);
+    const pending = c.refreshAll();
+    await vi.advanceTimersByTimeAsync(QUOTA_READ_TIMEOUT_MS + 1);
+    await pending;
+    expect(c.summary()).toMatchObject({ state: "unavailable", reason: expect.stringContaining("file_read_timeout") });
+  });
+
+  it("rejects non-files and files larger than the byte budget", async () => {
+    for (const file of [path.dirname(fileWith(FIXTURE)), fileWith("x".repeat(QUOTA_FILE_MAX_BYTES + 1))]) {
+      const c = new QuotaCollectorUsage({ file, rails: RAILS, now: () => FRESH_NOW });
+      await c.refreshAll();
+      expect(c.summary().state).toBe("unavailable");
+    }
+  });
+
+  it("enforces the byte budget even if the file grows after its metadata was read", async () => {
+    const file = fileWith(FIXTURE);
+    const open = fs.promises.open.bind(fs.promises);
+    vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+      const handle = await open(...args);
+      const stat = handle.stat.bind(handle);
+      vi.spyOn(handle, "stat").mockImplementation((async () => {
+        const before = await stat();
+        fs.appendFileSync(file, " ".repeat(QUOTA_FILE_MAX_BYTES));
+        return before;
+      }) as typeof handle.stat);
+      return handle;
+    });
+    const c = new QuotaCollectorUsage({ file, rails: RAILS, now: () => FRESH_NOW });
+    await c.refreshAll();
+    expect(c.summary()).toMatchObject({ state: "unavailable", reason: expect.stringContaining("file_too_large") });
+  });
   it("refreshing every rail reads the file once, and a single rail's refresh reads it once", async () => {
     const c = collector(FIXTURE);
-    const spy = vi.spyOn(fs.promises, "readFile");
+    const spy = vi.spyOn(fs.promises, "open");
     await c.refreshAll();
     expect(spy).toHaveBeenCalledTimes(1);
     spy.mockClear();
@@ -309,7 +344,7 @@ describe("one read of the file per refresh", () => {
   it("a status read re-reads the file at most once per interval", async () => {
     let t = Date.parse(FRESH_NOW);
     const c = new QuotaCollectorUsage({ file: fileWith(FIXTURE), rails: RAILS, now: () => new Date(t).toISOString(), minReadIntervalMs: 30_000 });
-    const spy = vi.spyOn(fs.promises, "readFile");
+    const spy = vi.spyOn(fs.promises, "open");
     await c.refreshIfStale(); await c.refreshIfStale();
     expect(spy).toHaveBeenCalledTimes(1);
     t += 31_000;

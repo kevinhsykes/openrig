@@ -50,7 +50,7 @@ function seatRestartOf(c: Context): SeatRestart {
 
 /** A Claude seat's relaunch for this request, by restore's own resume path in the seat's own pane: a snapshot, then only
  *  that seat launched from it, its process ended in place and the pane kept, all under the seat's lifecycle lease. */
-function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
+export function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
   const rigRepo = c.get("rigRepo" as never) as RigRepository;
   return {
     seat: (seat) => {
@@ -64,7 +64,10 @@ function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
     },
     tokenRef: (nodeId) => readClaudeSeatTokenRef(rigRepo.db, nodeId),
     setTokenRef: (nodeId, ref) => { rigRepo.setNodeClaudeTokenRef(nodeId, ref); },
-    configDir: (nodeId) => ({ declared: seatRuntimeHome(rigRepo.db, nodeId, "claude-code").home ?? null, effective: claudeConfigRootFor(rigRepo.db, nodeId) }),
+    configDir: (nodeId) => {
+      const home = seatRuntimeHome(rigRepo.db, nodeId, "claude-code");
+      return { declared: home.source === "member" ? home.home ?? null : null, effective: claudeConfigRootFor(rigRepo.db, nodeId) };
+    },
     // The seat's own (member) env, which restore, launch and handover all read through getEffectiveSeatEnv.
     setConfigDir: (nodeId, dir) => {
       if (!rigRepo.setNodeEnvVar(nodeId, "CLAUDE_CONFIG_DIR", dir)) throw Object.assign(new Error("the seat's env couldn't be written"), { code: "seat_env_unwritable" });
