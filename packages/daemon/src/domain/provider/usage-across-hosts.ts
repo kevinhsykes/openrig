@@ -348,7 +348,19 @@ const usageRowFields = {
 
 /** A served row with every field the grouping and the views read, typed as provider-types.ts says. */
 export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
-  if (!isRecord(v) || (v["provider"] !== "codex" && v["provider"] !== "claude")) return false;
+  if (!isRecord(v)) return false;
+  if (isRecord(v["source"]) && v["source"]["kind"] === "quota_collector_file") {
+    const identity = v["identity"];
+    const nonempty: Check = (value) => typeof value === "string" && value.trim().length > 0;
+    const collectorIdentity = record({
+      provider: nonempty, rail: nonempty, window: nonempty, source: str,
+      recordState: nullable(str), unknown: nullable(record({ kind: str, reason: nullable(str) })),
+    });
+    return nonempty(v["provider"]) && v["source"]["host"] === "local"
+      && isRecord(identity) && identity["rail"] === v["provider"]
+      && collectorIdentity(identity) && anyIdentityKeys(identity) && record(usageRowFields)(v);
+  }
+  if (v["provider"] !== "codex" && v["provider"] !== "claude") return false;
   const identity = v["provider"] === "codex" ? codexIdentity : claudeIdentity;
   return nullable((id) => identity(id) && anyIdentityKeys(id))(v["identity"]) && record(usageRowFields)(v);
 }
