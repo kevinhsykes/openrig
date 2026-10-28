@@ -13,7 +13,7 @@ import { OmpResumeAdapter } from "../src/adapters/omp-resume.js";
 import { OmpRuntimeAdapter } from "../src/adapters/omp-runtime-adapter.js";
 import {
   piSeatPaths, buildPiRunnerCommand, buildPiChildArgs, buildPiChildEnv,
-  providerFromModel, parsePiRunnerState, buildPendingRunnerState, PI_RUNNER_READY_MARKER,
+  providerFromModel, parsePiRunnerState, buildPendingRunnerState, nativeTuiStatePath, PI_RUNNER_READY_MARKER,
 } from "../src/adapters/pi-runner-protocol.js";
 
 const STATE_ROOT = "/openrig-home/state/pi";
@@ -259,6 +259,17 @@ describe("buildPiChildEnv — deny-by-default allowlist (BR-3)", () => {
 
 describe("PiRuntimeAdapter.launchHarness", () => {
   const binding = { tmuxSession: SESSION, cwd: "/work", model: "zai/glm-5.2" } as never;
+
+  it.each(["rpc", "tui", "unknown"])("startup input keeps the %s boundary explicit", async mode => {
+    const statePath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+    const fs = memFs({ "/role.md": "owned role orientation", ...(mode === "unknown" ? {} : { [statePath]: JSON.stringify({ ready: true, interaction: mode, launchId: "attempt-1", updatedAt: "now" }) }) });
+    const sendText = vi.fn(async () => ({ ok: true as const })); const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const adapter = adapterWith(fs, mockTmux({ sendText, sendKeys }));
+    const result = await adapter.deliverStartup([{ path: "role.md", absolutePath: "/role.md", ownerRoot: "/", deliveryHint: "send_text", required: true, appliesOn: ["fresh_start"] }], binding);
+    expect(result.failed).toHaveLength(mode === "rpc" ? 0 : 1);
+    expect(sendText).toHaveBeenCalledTimes(mode === "rpc" ? 1 : 0); expect(sendKeys).toHaveBeenCalledTimes(mode === "rpc" ? 1 : 0);
+    expect(adapter.requiresNativeInput(SESSION)).toBe(mode !== "rpc");
+  });
 
   it("fresh launch: types the runner command, then captures the session file from the sidecar", async () => {
     const fs = memFs();
@@ -512,6 +523,21 @@ describe("PiResumeAdapter", () => {
     const a = resumeAdapter(fs, mockTmux({ sendShellCommand }));
     const result = await a.resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
     expect(result).toEqual({ ok: true, appliedLaunch: PI_FLOOR_EFFECT });
+  });
+
+  it("preserves native TUI on exact resume and observes only the new attempt's file", async () => {
+    const statePath = piSeatPaths(STATE_ROOT, SESSION).runnerStatePath;
+    const prior = { ready: true, interaction: "tui", launchId: "old-attempt", sessionFile: SESSION_FILE, updatedAt: "prior", lastEntryId: "kept-cursor" };
+    const fs = memFs({ [SESSION_FILE]: "jsonl", [statePath]: JSON.stringify(prior), [nativeTuiStatePath(statePath, "old-attempt")]: JSON.stringify(prior) });
+    const sendShellCommand = vi.fn(async (_target: string, text: string) => {
+      expect(text).toContain("--interface tui"); expect(text).toContain(`--session '${SESSION_FILE}'`);
+      const id = launchIdFrom(text)!;
+      expect(JSON.parse(fs.files[statePath]!)).toMatchObject({ interaction: "tui", ready: false, lastEntryId: "kept-cursor" });
+      fs.files[nativeTuiStatePath(statePath, id)] = JSON.stringify({ ...prior, launchId: id });
+      return { ok: true as const };
+    });
+    const result = await resumeAdapter(fs, mockTmux({ sendShellCommand })).resume(SESSION, "pi_session_file", SESSION_FILE, "/work");
+    expect(result.ok).toBe(true); expect(sendShellCommand).toHaveBeenCalledOnce();
   });
 
   it("resume passes effort as --thinking for Pi; none without; OMP never", async () => {

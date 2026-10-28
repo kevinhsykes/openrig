@@ -34,7 +34,7 @@ import { OMP_MAX_FRAME_BYTES, OmpFrameDecoder, ompProtocolV2Limit } from "./omp-
 import {
   piSeatPaths, buildPiChildArgs, buildPiChildEnv, buildPendingRunnerState, parsePiRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_EXIT_MARKER, PI_RUNNER_ERROR_MARKER, PI_PROVIDER_ENV_VARS,
-  type PiRunnerState, type RunnerRuntime,
+  nativeTuiStatePath, readCurrentPiRunnerState, type PiInteraction, type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
 // ── Submitted input boundaries ─────────────────────────────────────────────
@@ -913,6 +913,7 @@ export class RunnerCore {
 // ── CLI entry ────────────────────────────────────────────────────────────────
 
 interface RunnerArgs {
+  interaction?: PiInteraction;
   runtime?: RunnerRuntime;
   sessionName: string;
   stateRoot: string;
@@ -942,6 +943,11 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
     };
     switch (flag) {
       case "--session-name": args.sessionName = next(); break;
+      case "--interface": {
+        const value = next();
+        if (value !== "rpc" && value !== "tui") throw new Error("Pi interface must be rpc or tui");
+        args.interaction = value; break;
+      }
       case "--runtime": {
         const runtime = next();
         if (runtime !== "pi" && runtime !== "omp") throw new Error(`unsupported runtime: ${runtime}`);
@@ -979,11 +985,12 @@ export function parseRunnerArgs(argv: string[]): RunnerArgs {
   } else if (!args.trust || flags.has("--approval-mode")) {
     throw new Error("an explicit trust flag is required: --approve or --no-approve");
   }
+  if (args.interaction === "tui" && (args.runtime === "omp" || args.usageFacts || args.openRouterCharge)) throw new Error("Native Pi TUI does not yet support OMP or usage-fact capture");
   if (args.sessionFile && args.forkRef) throw new Error("--session and --fork are mutually exclusive");
   return args as RunnerArgs;
 }
 
-function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; token: string } | null {
+export function resolveActivityEndpoint(env: NodeJS.ProcessEnv): { baseUrl: string; token: string } | null {
   let baseUrl = env.OPENRIG_URL?.trim() || null;
   let token = env.OPENRIG_ACTIVITY_HOOK_TOKEN?.trim() || null;
   if (!baseUrl && env.OPENRIG_PORT) {
@@ -1018,7 +1025,7 @@ export function prepareRunnerSidecar(
 ): { catchUpSince: string | undefined } {
   let prior: PiRunnerState | null = null;
   try {
-    prior = fsOps.exists(runnerStatePath) ? parsePiRunnerState(fsOps.readFile(runnerStatePath)) : null;
+    prior = fsOps.exists(runnerStatePath) ? readCurrentPiRunnerState(p => fsOps.readFile(p), runnerStatePath) : null;
   } catch { /* unreadable prior sidecar — treated as absent */ }
   try {
     fsOps.writeFile(runnerStatePath, JSON.stringify(buildPendingRunnerState(launchId, now(), prior)));
@@ -1118,6 +1125,42 @@ export function piLaunchCapabilityError(
   return `Pi invoked as ${command} (${version}; exact executable path unknown) rejects the managed --name/--${trust} flags. Install the current @earendil-works/pi-coding-agent (npm install -g @earendil-works/pi-coding-agent) and check 'command -v pi' in this pane; an older Pi installation may be shadowing it.`;
 }
 
+
+export async function launchNativePiTui(args: RunnerArgs, paths: ReturnType<typeof piSeatPaths>, childEnv: Record<string, string>): Promise<void> {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) throw new Error("Native Pi TUI requires a terminal");
+  const nodeId = process.env.OPENRIG_NODE_ID;
+  const generation = process.env.OPENRIG_OCCUPANT_GENERATION;
+  if (!nodeId || !generation || !resolveActivityEndpoint(childEnv)) throw new Error("Native Pi identity or activity endpoint is unavailable");
+  const extensionPath = nodePath.resolve(import.meta.dirname, "pi-tui-extension.js");
+  if (!fs.existsSync(extensionPath)) throw new Error("Native Pi lifecycle extension is missing");
+  const pending = parsePiRunnerState(fs.readFileSync(paths.runnerStatePath, "utf8"));
+  if (pending?.launchId !== args.launchId) throw new Error("Native Pi launch attempt was superseded");
+  fs.writeFileSync(paths.runnerStatePath, JSON.stringify({ ...pending, interaction: "tui" }));
+  const nativeEnv = { ...childEnv, OPENRIG_PI_TUI_LAUNCH: JSON.stringify({
+    sessionName: args.sessionName, nodeId, generation, launchId: args.launchId,
+    sessionsDir: paths.sessionsDir, statePath: paths.runnerStatePath, expectedSessionFile: args.sessionFile,
+  }) };
+  const nativeArgs = buildPiChildArgs({ ...args, sessionsDir: paths.sessionsDir, interaction: "tui", extensionPath });
+  const child = spawn("pi", nativeArgs, { cwd: args.cwd, env: nativeEnv, stdio: "inherit" });
+  const signal = () => { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); };
+  process.once("SIGTERM", signal); process.once("SIGINT", signal);
+  try {
+    const code = await new Promise<number>((resolve, reject) => {
+      child.once("error", reject); child.once("exit", value => resolve(value ?? 1));
+    });
+    process.exitCode = code;
+  } finally {
+    process.removeListener("SIGTERM", signal); process.removeListener("SIGINT", signal);
+    const actual = readCurrentPiRunnerState(p => fs.readFileSync(p, "utf8"), paths.runnerStatePath);
+    if (actual?.launchId === args.launchId) {
+      const at = new Date().toISOString();
+      fs.writeFileSync(nativeTuiStatePath(paths.runnerStatePath, args.launchId), JSON.stringify({
+        ...actual, ready: false, interaction: "tui", updatedAt: at, exited: { code: child.exitCode, at },
+      }), { mode: 0o600 });
+    }
+  }
+}
+
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   let args: RunnerArgs;
   try {
@@ -1166,6 +1209,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     forkRef: args.forkRef,
     runtime,
   });
+
+  if (args.interaction === "tui") {
+    try { await launchNativePiTui(args, paths, childEnv); }
+    catch (error) {
+      const at = new Date().toISOString();
+      fs.writeFileSync(nativeTuiStatePath(paths.runnerStatePath, args.launchId), JSON.stringify({
+        ready: false, interaction: "tui", launchId: args.launchId, updatedAt: at, exited: { code: 2, at },
+      }), { mode: 0o600 });
+      console.error(`${PI_RUNNER_ERROR_MARKER} ${(error as Error).message}`);
+      process.exitCode = 2;
+    }
+    return;
+  }
 
   if (runtime === "pi") {
     console.log(`[pi-runner] seat ${args.sessionName}: ${piCredentialNotice({

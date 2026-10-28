@@ -19,6 +19,14 @@
 import nodePath from "node:path";
 import { shellQuote } from "./shell-quote.js";
 export type RunnerRuntime = "pi" | "omp";
+export type PiInteraction = "rpc" | "tui";
+
+/** Explicit deployment selection; a typo must not silently change the interface. */
+export function piInteraction(value = process.env.OPENRIG_PI_INTERFACE): PiInteraction {
+  if (value === undefined || value === "" || value === "rpc") return "rpc";
+  if (value === "tui") return "tui";
+  throw new Error("OPENRIG_PI_INTERFACE must be rpc or tui");
+}
 
 // ── Seat state layout ────────────────────────────────────────────────────────
 // <stateRoot>/<sessionName>/agent     → PI_CODING_AGENT_DIR (auth.json, models.json, skills, …)
@@ -52,6 +60,7 @@ export const PI_RUNNER_ERROR_MARKER = "[pi-runner] ERROR";
 
 export interface PiRunnerState {
   ready: boolean;
+  interaction?: PiInteraction;
   /** Launch-attempt scope (guard fold, code-review):
    *  the adapter mints a launchId per attempt, pre-writes a pending sidecar
    *  carrying it, and passes --launch-id to the runner; the runner stamps it
@@ -59,9 +68,9 @@ export interface PiRunnerState {
    *  launchId differs — durable artifacts from prior runner instances can
    *  never false-green a new launch or false-fail it with a stale exit. */
   launchId?: string;
-  /** Absolute session-file path from RPC get_state — the resume token. */
+  /** Absolute session-file path from RPC get_state or native SessionManager — the resume token. */
   sessionFile?: string;
-  /** UUIDv7 session id from get_state — display/fallback metadata. */
+  /** Native session id — display/fallback metadata, never served-model identity. */
   sessionId?: string;
   /** Durable catch-up cursor: last session-entry id projected to the bus. */
   lastEntryId?: string;
@@ -81,9 +90,11 @@ export function buildPendingRunnerState(
   launchId: string,
   updatedAt: string,
   prior: PiRunnerState | null,
+  interaction?: PiInteraction,
 ): PiRunnerState {
   return {
     ready: false,
+    ...(interaction === "tui" ? { interaction } : {}),
     launchId,
     lastEntryId: prior?.lastEntryId,
     updatedAt,
@@ -96,10 +107,30 @@ export function parsePiRunnerState(raw: string): PiRunnerState | null {
     if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return null;
     const state = parsed as Record<string, unknown>;
     if (typeof state.ready !== "boolean" || typeof state.updatedAt !== "string") return null;
+    if (state.interaction !== undefined && state.interaction !== "rpc" && state.interaction !== "tui") return null;
     return parsed as unknown as PiRunnerState;
   } catch {
     return null;
   }
+}
+
+/** Native extensions write an attempt-specific file, so a retiring UI cannot overwrite
+ * the next launch's pending state or its durable cursor. The shared file selects the attempt. */
+export function nativeTuiStatePath(statePath: string, launchId: string): string {
+  if (!/^[A-Za-z0-9-]+$/.test(launchId)) throw new Error("Invalid native Pi launch id");
+  return `${statePath}.${launchId}.tui.json`;
+}
+
+export function readCurrentPiRunnerState(read: (path: string) => string, statePath: string): PiRunnerState | null {
+  try {
+    const pending = parsePiRunnerState(read(statePath));
+    if (pending?.interaction !== "tui" || !pending.launchId) return pending;
+    const waiting = { ...pending, ready: false };
+    let actual: PiRunnerState | null;
+    try { actual = parsePiRunnerState(read(nativeTuiStatePath(statePath, pending.launchId))); }
+    catch { return waiting; }
+    return actual?.interaction === "tui" && actual.launchId === pending.launchId ? actual : waiting;
+  } catch { return null; }
 }
 
 // ── Provider env passthrough (BR-3 / FR-7) ──────────────────────────────────
@@ -242,6 +273,7 @@ export function buildPiChildEnv(
 export interface PiRunnerLaunchOpts {
   /** Explicit runtime; omitted keeps the original Pi command byte-for-byte. */
   runtime?: RunnerRuntime;
+  interaction?: PiInteraction;
   /** Absolute path to the compiled runner entry (daemon dist). */
   runnerEntryPath: string;
   /** The seat's canonical session name (identity + sidecar key). */
@@ -281,6 +313,7 @@ export function piThinkingValue(thinking: string | null | undefined): string | u
 /** The command typed into the seat's tmux pane. The runner owns everything
  *  past this boundary (pi spawn, env allowlist, RPC, mirror, sidecar). */
 export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
+  if (opts.interaction === "tui" && opts.runtime === "omp") throw new Error("Native TUI is Pi-only");
   const parts = [
     "node",
     shellQuote(opts.runnerEntryPath),
@@ -292,6 +325,7 @@ export function buildPiRunnerCommand(opts: PiRunnerLaunchOpts): string {
       ? ["--runtime", "omp", "--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]
       : [`--${opts.trust}`]),
   ];
+  if (opts.interaction === "tui") parts.push("--interface", "tui");
   if (opts.model?.trim()) {
     parts.push("--model", shellQuote(opts.model.trim()));
   }
@@ -325,9 +359,14 @@ export function buildPiChildArgs(opts: {
   sessionFile?: string;
   forkRef?: string;
   runtime?: RunnerRuntime;
+  interaction?: PiInteraction;
+  extensionPath?: string;
 }): string[] {
+  if (opts.interaction === "tui" && (opts.runtime === "omp" || !opts.extensionPath)) {
+    throw new Error("Native Pi TUI requires its typed extension");
+  }
   const args = [
-    "--mode", "rpc",
+    ...(opts.interaction === "tui" ? ["--extension", opts.extensionPath!] : ["--mode", "rpc"]),
     "--session-dir", opts.sessionsDir,
     ...(opts.runtime === "omp"
       ? ["--approval-mode", opts.trust === "approve" ? "yolo" : "always-ask"]

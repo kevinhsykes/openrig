@@ -5,9 +5,10 @@
 // first-class integration surface). send/capture stay tmux-native and are NOT
 // adapter methods (the runner forwards pane stdin to RPC prompt/steer and
 // mirrors a legible transcript to pane stdout); activity + session identity
-// come from Pi's typed RPC events + get_state via the runner's sidecar and
-// bus emission — never pane scraping (BR-1). TUI-native Pi is a SEPARATE
-// future contract, never a hidden mode here (BR-2).
+// come from typed runtime events via the runner's sidecar and existing activity
+// endpoint, never pane scraping (BR-1). Explicit native TUI selection uses the
+// public Pi extension lifecycle; RPC remains the default. Native automatic input
+// refuses until typed delivery is connected, so it cannot submit a human draft.
 
 import nodePath from "node:path";
 import { randomUUID } from "node:crypto";
@@ -27,7 +28,7 @@ import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permis
 import {
   piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState,
   PI_RUNNER_READY_MARKER, PI_RUNNER_ERROR_MARKER, PI_RUNNER_EXIT_MARKER,
-  type PiRunnerState, type RunnerRuntime,
+  readCurrentPiRunnerState, type PiInteraction, type PiRunnerState, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 
 const SHELL_COMMANDS = new Set(["bash", "fish", "nu", "sh", "tmux", "zsh"]);
@@ -51,6 +52,7 @@ export interface PiRuntimeAdapterDeps {
   stateRoot: string;
   /** Absolute path to the compiled pi-runner entry in the daemon dist. */
   runnerEntryPath: string;
+  interaction?: () => PiInteraction;
   /** Trust posture for managed launches (BR-5 — always explicit; ambient
    *  `ask` silently skips in RPC mode). Default: "no-approve" (the
    *  conservative floor; seat-level guidance/skills live in the seat's
@@ -72,6 +74,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
   private fs: PiAdapterFsOps;
   protected stateRoot: string;
   private runnerEntryPath: string;
+  private interaction: () => PiInteraction;
   private trustPosture: "approve" | "no-approve";
   private sleep: (ms: number) => Promise<void>;
   private newLaunchId: () => string;
@@ -86,6 +89,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     this.fs = deps.fsOps;
     this.stateRoot = deps.stateRoot;
     this.runnerEntryPath = deps.runnerEntryPath;
+    this.interaction = deps.interaction ?? (() => "rpc");
     this.trustPosture = deps.trustPosture ?? "no-approve";
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
     this.newLaunchId = deps.newLaunchId ?? (() => randomUUID());
@@ -106,6 +110,13 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // that does not exist cannot be used as a resume token.
     if (this.runtime === "omp" && !this.fs.exists(state.sessionFile)) return { ok: false, reason: "missing_sidecar" };
     return { ok: true, sessionFile: state.sessionFile };
+  }
+
+  /** Native TUI input must use its SDK, never paste into the human's editor. */
+  requiresNativeInput(sessionName: string): boolean {
+    if (this.runtime !== "pi") return false;
+    const state = this.readRunnerState(sessionName);
+    return state ? state.interaction === "tui" : true;
   }
 
   /** The seat's runner sidecar (null = absent or unparseable) and its sessions folder, with the
@@ -198,6 +209,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
             break;
           }
           case "send_text": {
+            if (this.runtime === "pi" && (!binding.tmuxSession || this.requiresNativeInput(binding.tmuxSession))) throw new Error("Native or unknown Pi input requires typed delivery; no terminal input was written");
             if (binding.tmuxSession) {
               // The runner reads pane stdin and forwards as RPC prompt (FR-3).
               const textResult = await this.tmux.sendText(binding.tmuxSession, content);
@@ -224,6 +236,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     binding: NodeBinding,
     opts: { name: string; resumeToken?: string; forkSource?: ForkSource },
   ): Promise<HarnessLaunchResult> {
+    let interaction = this.runtime === "pi" ? this.interaction() : "rpc";
     if (!binding.tmuxSession) {
       return { ok: false, error: `No tmux session bound — cannot launch the ${this.runtime === "pi" ? "Pi" : "OMP"} harness` };
     }
@@ -270,9 +283,11 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     // (lastEntryId, FR-5) survives the reset.
     const launchId = this.newLaunchId();
     const prior = this.readRunnerState(sessionName);
+    if (opts.resumeToken && prior?.interaction === "tui") interaction = "tui";
+    if (interaction === "tui" && (this.usageFactsEnabled() || this.openRouterChargeEnabled())) return { ok: false, error: "Native Pi TUI usage-fact capture is not available" };
     this.fs.writeFile(
       paths.runnerStatePath,
-      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
+      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior, interaction)),
     );
 
     const trust = this.runtime === "omp"
@@ -284,6 +299,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const cmd = buildPiRunnerCommand({
       runtime: this.runtime,
       runnerEntryPath: this.runnerEntryPath,
+      interaction,
       sessionName,
       stateRoot: this.stateRoot,
       cwd: binding.cwd,
@@ -394,7 +410,7 @@ export class PiRuntimeAdapter implements RuntimeAdapter {
     const { runnerStatePath } = piSeatPaths(this.stateRoot, sessionName);
     if (!this.fs.exists(runnerStatePath)) return null;
     try {
-      return parsePiRunnerState(this.fs.readFile(runnerStatePath));
+      return readCurrentPiRunnerState(p => this.fs.readFile(p), runnerStatePath);
     } catch {
       return null;
     }

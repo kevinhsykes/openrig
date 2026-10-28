@@ -15,7 +15,7 @@ import type { SeatLaunchEnvironment } from "../domain/seat-launch-environment.js
 import type { ResumeResult } from "./claude-resume.js";
 import { piTrust, yoloEnabled } from "./yolo-mode.js";
 import {
-  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, type RunnerRuntime,
+  piSeatPaths, parsePiRunnerState, buildPiRunnerCommand, buildPendingRunnerState, readCurrentPiRunnerState, type PiInteraction, type RunnerRuntime,
 } from "./pi-runner-protocol.js";
 import { observePiResourceTrust, observeOmpApprovalMode } from "../domain/permission-drift.js";
 
@@ -29,6 +29,7 @@ export interface PiResumeFsOps {
 }
 
 interface PiResumeOptions {
+  interaction?: () => PiInteraction;
   seatLaunchEnvironment?: SeatLaunchEnvironment;
   pollMs?: number;
   maxWaitMs?: number;
@@ -68,6 +69,7 @@ export class PiResumeAdapter {
     // The seat's resolved effort, sent as Pi's --thinking (OMP unchanged).
     effort?: string | null,
   ): Promise<ResumeResult> {
+    let interaction = this.runtime === "pi" ? (this.options.interaction?.() ?? "rpc") : "rpc";
     if (!this.canResume(resumeType, resumeToken)) {
       return { ok: false, code: "no_resume", message: `${this.label} resume not available` };
     }
@@ -88,10 +90,12 @@ export class PiResumeAdapter {
     // only states stamped with THIS attempt's launchId. The prior record is
     // read FIRST so the durable catch-up cursor (lastEntryId, FR-5) survives.
     const launchId = (this.options.newLaunchId ?? (() => randomUUID()))();
-    const prior = this.fs.exists(seat.runnerStatePath) ? parsePiRunnerState(this.readSafe(seat.runnerStatePath)) : null;
+    const prior = this.fs.exists(seat.runnerStatePath) ? readCurrentPiRunnerState(p => this.readSafe(p), seat.runnerStatePath) : null;
+    if (this.runtime === "pi" && prior?.interaction === "tui") interaction = "tui";
+    if (interaction === "tui" && (this.options.usageFactsEnabled?.() || this.options.openRouterChargeEnabled?.())) return { ok: false, code: "resume_failed", message: "Native Pi TUI usage-fact capture is not available" };
     this.fs.writeFile(
       seat.runnerStatePath,
-      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior)),
+      JSON.stringify(buildPendingRunnerState(launchId, new Date().toISOString(), prior, interaction)),
     );
 
     const trust = this.runtime === "omp"
@@ -103,6 +107,7 @@ export class PiResumeAdapter {
     const cmd = buildPiRunnerCommand({
       runtime: this.runtime,
       runnerEntryPath: this.paths.runnerEntryPath,
+      interaction,
       sessionName: tmuxSessionName,
       stateRoot: this.paths.stateRoot,
       cwd,
@@ -148,7 +153,7 @@ export class PiResumeAdapter {
 
     for (let attempt = 0; attempt < attempts; attempt++) {
       const { runnerStatePath } = piSeatPaths(this.paths.stateRoot, tmuxSessionName);
-      const state = this.fs.exists(runnerStatePath) ? parsePiRunnerState(this.readSafe(runnerStatePath)) : null;
+      const state = this.fs.exists(runnerStatePath) ? readCurrentPiRunnerState(p => this.readSafe(p), runnerStatePath) : null;
 
       if (state?.launchId === launchId) {
         if (state.exited) {

@@ -578,6 +578,18 @@ describe("SessionTransport", () => {
     return { rig, node, session };
   }
 
+  it("refuses automatic native Pi TUI input before paste or Enter", async () => {
+    seedCanonicalRig("pi");
+    const sendText = vi.fn(async () => ({ ok: true as const }));
+    const sendKeys = vi.fn(async () => ({ ok: true as const }));
+    const transport = createTransport(mockTmux({ sendText, sendKeys }), {
+      runtimeAdapters: { pi: { requiresNativeInput: () => true } },
+    });
+    const result = await transport.send("dev-impl@my-rig", "preserve the person's unfinished draft");
+    expect(result).toMatchObject({ ok: false, sent: false, inputPhase: "not_reached", reason: "native_input_required" });
+    expect(sendText).not.toHaveBeenCalled(); expect(sendKeys).not.toHaveBeenCalled();
+  });
+
   it("community contract: a successful queue wake passes through the transport once", async () => {
     const { session } = seedCanonicalRig("synth");
     sessionRegistry.recordCommunityHarnessSelection(session.id, "synth");

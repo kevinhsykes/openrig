@@ -1936,6 +1936,7 @@ export interface BroadcastResult {
 
 export interface TransportReadinessChecker {
   checkReady?(binding: NodeBinding, options?: ReadinessOptions): Promise<ReadinessResult>;
+  requiresNativeInput?(sessionName: string): boolean;
 }
 
 interface SessionTransportDeps {
@@ -2679,6 +2680,10 @@ export class SessionTransport {
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;
+    if (runtime && this.runtimeAdapters[runtime]?.requiresNativeInput?.(sessionName)) {
+      return { ok: false, sessionName, sent: false, inputPhase: "not_reached", reason: "native_input_required",
+        error: "Native or unknown Pi input requires typed delivery. No terminal input was written." };
+    }
     const readTarget = sessionMeta.pane ?? sessionName;
     let runtimeAdvisory: string | undefined;
     const bindingChanged = () => JSON.stringify(this.getSessionMeta(sessionName)) !== JSON.stringify(sessionMeta);
