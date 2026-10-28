@@ -56,10 +56,13 @@ describe("#141 shrinking an archived generation's pod vs the live replacement's 
     stale = generation("exited");
     rigRepo.archiveRig(stale.rigId);
     live = generation("running");
-    // A running seat elsewhere that can take explicitly rerouted work.
+    // A running seat elsewhere that can take explicitly rerouted work. A real launched seat carries a
+    // terminal binding (that is what tmux delivery addresses), so model it: without the binding the
+    // destination-classification seam correctly calls this address unroutable.
     const ops = rigRepo.createRig("ops-rig");
     const orch = rigRepo.addNode(ops.id, "orch.lead", { runtime: "claude-code" });
     sessionRegistry.updateStatus(sessionRegistry.registerSession(orch.id, FALLBACK).id, "running");
+    sessionRegistry.updateBinding(orch.id, { tmuxSession: FALLBACK });
   });
   afterEach(() => db.close());
 
@@ -149,6 +152,7 @@ describe("#141 shrink target members sharing a session name", () => {
     const ops = rigRepo.createRig("ops-rig");
     const orch = rigRepo.addNode(ops.id, "orch.lead", { runtime: "claude-code" });
     sessionRegistry.updateStatus(sessionRegistry.registerSession(orch.id, FALLBACK).id, "running");
+    sessionRegistry.updateBinding(orch.id, { tmuxSession: FALLBACK });
   });
   afterEach(() => db.close());
 
