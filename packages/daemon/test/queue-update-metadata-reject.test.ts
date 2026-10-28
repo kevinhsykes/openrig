@@ -114,6 +114,64 @@ describe("51-06 D2 — non-park queue update metadata reject", () => {
     expect(people.update({ qitemId: bare, actorSession: "orch@rig", state: "blocked", blockedOn })).toMatchObject({ state: "blocked", summary: null });
   });
 
+  describe("a refused park names the blocker and what counts as a person", () => {
+    const park = (blockedOn: string, extra: Record<string, unknown> = {}) => async () => {
+      const id = await mkItem();
+      let err: unknown;
+      try { repo.update({ qitemId: id, actorSession: "orch@rig", state: "blocked", blockedOn, summary: "S", evidenceRef: "/p/e.md", ...extra }); }
+      catch (e) { err = e; }
+      return { id, err: err as QueueRepositoryError };
+    };
+
+    it.each(["kevin", "operator-human@kernel", "human@rig", "someone@nowhere"])("--on %s: same code, the message quotes the value and lists the accepted forms", async (blockedOn) => {
+      const { id, err } = await park(blockedOn)();
+      expect(err).toBeInstanceOf(QueueRepositoryError);
+      expect(err.code).toBe(REJECT_CODE);
+      expect(err.message).toContain(`'${blockedOn}'`);
+      for (const form of ["human@kernel", "human@host", "human-<name>@kernel", "human-<name>@host", "<name>@external", "registered person"]) expect(err.message).toContain(form);
+      expect(err.message).toContain("--summary / --evidence-ref");
+      // The change is in the words only: the same fields are named and nothing was written.
+      expect(err.meta?.invalidFields).toEqual(["summary", "evidenceRef"]);
+      expect(repo.getByIdOrThrow(id).state).toBe("pending");
+    });
+
+    it("blocked on a qitem id: the message quotes that id and says a qitem blocker cannot carry them", async () => {
+      const blocker = await mkItem();
+      const { err } = await park(blocker)();
+      expect(err.code).toBe(REJECT_CODE);
+      expect(err.message).toContain(`'${blocker}'`);
+      expect(err.message).toContain("human-<name>@kernel");
+    });
+
+    it("what is accepted is unchanged: human seats and @external still park with both fields", async () => {
+      for (const blockedOn of ["human@kernel", "human@host", "human-kevin@kernel", "human-kevin@host", "kevin@external"]) {
+        const { err, id } = await park(blockedOn)();
+        expect(err, blockedOn).toBeUndefined();
+        expect(repo.getByIdOrThrow(id)).toMatchObject({ state: "blocked", blockedOn, summary: "S", evidenceRef: "/p/e.md" });
+      }
+    });
+
+    it("a non-park transition keeps its own message (no person talk)", async () => {
+      const id = await mkItem();
+      let err: unknown;
+      try { repo.update({ qitemId: id, actorSession: "dev-x@rig", state: "in-progress", summary: "S" }); } catch (e) { err = e; }
+      expect((err as QueueRepositoryError).code).toBe(REJECT_CODE);
+      expect((err as QueueRepositoryError).message).toContain("the 'in-progress' transition cannot store it");
+      expect((err as QueueRepositoryError).message).not.toContain("human-<name>@kernel");
+    });
+
+    it("over HTTP the 400 body carries the same text", async () => {
+      const created = await app.request("/api/queue/create", { method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "orch@rig" }, body: JSON.stringify({ sourceSession: "orch@rig", destinationSession: "dev-x@rig", body: "r" }) });
+      const id = ((await created.json()) as { qitemId: string }).qitemId;
+      const res = await app.request(`/api/queue/${id}/update`, { method: "POST", headers: { "content-type": "application/json", "X-OpenRig-Session": "dev-x@rig" }, body: JSON.stringify({ state: "blocked", blockedOn: "kevin", summary: "S", evidenceRef: "/p/e.md" }) });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: string; message: string };
+      expect(body.error).toBe(REJECT_CODE);
+      expect(body.message).toContain("'kevin'");
+      expect(body.message).toContain("human-<name>@kernel");
+    });
+  });
+
   it("an unregistered name on another daemon's domain still refuses summary on a park", async () => {
     const nobody = new QueueRepository(db, bus, { validateRig: () => true, loadHumanRegistry: () => ({ ok: true, entities: [] }) });
     const id = await mkItem();
