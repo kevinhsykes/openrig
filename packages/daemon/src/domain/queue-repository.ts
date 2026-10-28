@@ -268,6 +268,9 @@ export interface QueueItem {
   targetRepo: string | null;
   /** D4222 — the caller's dedupe key while the row is open at its destination; absent when the row has none. */
   dedupeKey?: string;
+  /** D4222 — the id of the row's newest transition. Send it back as `expectedTransitionId` to make an update fail
+   *  with `stale_transition` if anything has been written to the row since you read it. */
+  lastTransitionId?: number;
 }
 
 interface QueueItemRow {
@@ -410,6 +413,9 @@ export interface QueueUpdateInput {
   qitemId: string;
   actorSession: string;
   state?: QueueState;
+  /** D4222 — refuse the update (409 stale_transition) unless the row's newest transition is this one. Absent: no
+   *  precondition. A close that was decided from a stale read must not reach a row that has since been reopened. */
+  expectedTransitionId?: number | null;
   /** Explicit acknowledgment for a deliberate terminal → active repair. */
   reopen?: boolean;
   /**
@@ -622,6 +628,12 @@ export function isQitemPrimaryKeyConflict(err: unknown): boolean {
 
 /** D4222: the longest dedupe key a create may carry. */
 const DEDUPE_KEY_MAX_LENGTH = 200;
+
+/** D4222: who a coalesced raise is recorded under. A system actor, so a repeated raise is not the owner's act and does
+ *  not move the row's last meaningful change (the stuck sweep must still see an unpicked alarm as unpicked). The raiser
+ *  is named in the note. */
+const COALESCE_ACTOR = "daemon@kernel";
+const COALESCE_NOTE_PREFIX = "coalesced raise from ";
 
 /**
  * D4222: is this the partial unique index on (destination_session, dedupe_key)? Distinct from
@@ -1842,8 +1854,11 @@ export class QueueRepository {
   async create(input: QueueCreateInput): Promise<QueueItem & {
     /** Response-only: the retry's changed body was not written. Never stored on the row. */
     createWarning?: { code: "qitem_body_not_saved"; message: string };
-    /** Response-only: an open row already held the dedupeKey, and it is returned unchanged. Never stored. */
+    /** Response-only: an open row already held the dedupeKey, and it is returned. Its body, summary and tags are
+     *  untouched; one coalesced-raise transition was appended. Never stored on the row. */
     deduped?: true;
+    /** Response-only, with `deduped`: how many raises have been coalesced into this row, counted from its transitions. */
+    coalescedCount?: number;
   }> {
     // FOUNDER ROOT INVARIANT (2026-08-27, supersedes 51-09 incr 4 / ruling cb19867f Q2):
     // a LOCAL write stores the bare transport identity — no self-host suffix inside one
@@ -2860,11 +2875,28 @@ export class QueueRepository {
    * Phase A write surface so update-path mutations are visible to the
    * view bridge.
    */
-  update(input: QueueUpdateInput): QueueItem {
+  update(input: QueueUpdateInput): QueueItem & {
+    /** Response-only: the update named the terminal state the row already held, so no state was written. Never stored. */
+    alreadyTerminal?: true;
+    updateWarning?: { code: "already_terminal"; currentState: string; lastTransitionId: number | null; message: string };
+  } {
     const txn = this.db.transaction(() => this.updateInTransactionalContext(input));
     const result = txn();
     for (const event of result.persistedEvents) this.eventBus.notifySubscribers(event);
-    return this.getByIdOrThrow(input.qitemId);
+    const item = this.getByIdOrThrow(input.qitemId);
+    if (!result.alreadyTerminal) return item;
+    // D4222: S8a keeps a same-state reassertion an append (an auditor confirming a terminal state). A stale close has the
+    // same shape, so the answer says plainly that nothing was closed. The loud refusal is expectedTransitionId.
+    return {
+      ...item,
+      alreadyTerminal: true,
+      updateWarning: {
+        code: "already_terminal",
+        currentState: item.state,
+        lastTransitionId: item.lastTransitionId ?? null,
+        message: `qitem ${item.qitemId} was already '${item.state}', so no state was written; ${input.transitionNote?.trim() ? "your note was appended" : "an empty transition was appended"}. Its newest transition is now ${item.lastTransitionId ?? "unknown"}. This did not close anything. To refuse a close that was decided from an old read, send expectedTransitionId.`,
+      },
+    };
   }
 
   /**
@@ -2920,6 +2952,8 @@ export class QueueRepository {
   private updateInTransactionalContext(input: QueueUpdateInput): {
     persistedEvent: PersistedEvent;
     persistedEvents: PersistedEvent[];
+    /** D4222: this update named the terminal state the row already held (S8a: an append, no state written). */
+    alreadyTerminal?: boolean;
   } {
     const qitem = this.getById(input.qitemId);
     if (!qitem) {
@@ -2927,6 +2961,9 @@ export class QueueRepository {
         "qitem_not_found",
         `qitem ${input.qitemId} not found`
       );
+    }
+    if (input.expectedTransitionId !== undefined && input.expectedTransitionId !== null) {
+      this.assertExpectedTransition(qitem, input.expectedTransitionId);
     }
     const hasNote = typeof input.transitionNote === "string" && input.transitionNote.trim().length > 0;
     const hasValidSummary = typeof input.summary === "string" && input.summary.trim().length > 0;
@@ -2972,6 +3009,7 @@ export class QueueRepository {
         throw new QueueRepositoryError(
           "note_append_fields_not_admitted",
           "a state-preserving note append accepts only --note (and an optional same --state); state-write fields were supplied, so nothing was written",
+          { currentState: qitem.state },
         );
       }
 
@@ -3006,7 +3044,7 @@ export class QueueRepository {
         actorSession: input.actorSession,
         summary: hasValidSummary ? input.summary! : (qitem.summary ?? null),
       });
-      return { persistedEvent, persistedEvents: [persistedEvent] };
+      return { persistedEvent, persistedEvents: [persistedEvent], ...(input.state !== undefined ? { alreadyTerminal: true } : {}) };
     }
     if (!isQueueState(input.state)) {
       throw new QueueRepositoryError(
@@ -4797,12 +4835,14 @@ export class QueueRepository {
     return row ? this.getById(row.qitem_id) ?? undefined : undefined;
   }
 
-  /** D4222 — a create that found its key held: the open row, unchanged. A key held by another source is a named
-   *  conflict (the mirror of qitem_id_reuse); a changed body is reported, never saved. */
+  /** D4222 — a create that found its key held: the open row, with the raise recorded on it. A key held by another
+   *  source is a named conflict (the mirror of qitem_id_reuse). The row's body, summary and tags are never touched: one
+   *  transition is appended ("coalesced raise from <source>, body sha256 <x>"), so the second raise is visible in
+   *  `rig queue transitions`, and a changed body is reported, never saved. */
   private dedupeHit(
     input: QueueCreateInput,
     key: string,
-  ): (QueueItem & { createWarning?: { code: "qitem_body_not_saved"; message: string }; deduped: true }) | null {
+  ): (QueueItem & { createWarning?: { code: "qitem_body_not_saved"; message: string }; deduped: true; coalescedCount: number }) | null {
     const open = this.openDedupeHolder(input.destinationSession, key);
     if (!open) return null;
     if (open.sourceSession !== input.sourceSession) {
@@ -4812,18 +4852,64 @@ export class QueueRepository {
         { dedupeKey: key, existingQitemId: open.qitemId, existingSource: open.sourceSession },
       );
     }
+    const bodySha256 = createHash("sha256").update(input.body).digest("hex");
+    const coalescedCount = this.db.transaction(() => {
+      this.transitionLog.append({
+        qitemId: open.qitemId,
+        state: open.state,
+        actorSession: COALESCE_ACTOR,
+        transitionNote: `${COALESCE_NOTE_PREFIX}${input.sourceSession}, body sha256 ${bodySha256}`,
+      });
+      return this.coalescedCountOf(open.qitemId);
+    })();
+    const survivor = this.getById(open.qitemId) ?? open;
     return {
-      ...open,
+      ...survivor,
       deduped: true,
+      coalescedCount,
       ...(open.body !== input.body
         ? {
           createWarning: {
             code: "qitem_body_not_saved" as const,
-            message: `dedupe key '${key}' is held by open row ${open.qitemId} with a different body. The supplied body was not saved; the existing row is returned unchanged. No new work or delivery was created.`,
+            message: `dedupe key '${key}' is held by open row ${open.qitemId} with a different body. The supplied body was not saved; the existing row is returned unchanged. The raise was recorded on it (body sha256 ${bodySha256}). No new work or delivery was created.`,
           },
         }
         : {}),
     };
+  }
+
+  /** D4222 — raises coalesced into a row, counted from its transitions so nothing is stored beside them. Only the
+   *  system's own entries count: a note typed by hand cannot move the number. */
+  private coalescedCountOf(qitemId: string): number {
+    return (this.db.prepare(
+      "SELECT COUNT(*) c FROM queue_transitions WHERE qitem_id = ? AND actor_session = ? AND transition_note LIKE ?",
+    ).get(qitemId, COALESCE_ACTOR, `${COALESCE_NOTE_PREFIX}%`) as { c: number }).c;
+  }
+
+  /** D4222 — the newest transition id of a row, or null when it has none (a fixture without the log). */
+  private lastTransitionIdOf(qitemId: string): number | null {
+    if (!this.hasQueueTransitionsTable) return null;
+    const row = this.db.prepare("SELECT MAX(transition_id) m FROM queue_transitions WHERE qitem_id = ?").get(qitemId) as { m: number | null };
+    return row.m;
+  }
+
+  /** D4222 — an update that names the transition it was decided from. A write since then makes it stale, and nothing
+   *  is changed. Checked before every other rule, in the same transaction as the write it guards. */
+  private assertExpectedTransition(qitem: QueueItem, expected: unknown): void {
+    if (typeof expected !== "number" || !Number.isInteger(expected) || expected < 1) {
+      throw new QueueRepositoryError(
+        "invalid_expected_transition",
+        `expectedTransitionId must be a positive integer (the lastTransitionId the row showed); got ${JSON.stringify(expected)}. Nothing was changed.`,
+      );
+    }
+    const current = this.lastTransitionIdOf(qitem.qitemId);
+    if (current !== expected) {
+      throw new QueueRepositoryError(
+        "stale_transition",
+        `qitem ${qitem.qitemId} has changed since you read it: its newest transition is ${current}, not ${expected}. It is '${qitem.state}' now. Nothing was changed; read it again and decide again.`,
+        { qitemId: qitem.qitemId, expectedTransitionId: expected, currentTransitionId: current, currentState: qitem.state },
+      );
+    }
   }
 
   /** D4222 — a reopen would make a second open holder of the row's key. */
@@ -5042,6 +5128,7 @@ export class QueueRepository {
       postClaimMotionCount: 0, // this reader supplies the current meaningful timestamp
     });
     const handoffAdvisory = this.handoffAdvisory(row);
+    const lastTransitionId = this.lastTransitionIdOf(row.qitem_id);
     return {
       ...(handoffAdvisory ? { handoffAdvisory } : {}),
       pickup,
@@ -5086,6 +5173,7 @@ export class QueueRepository {
       // older test fixtures supply legacy rows where target_repo is undefined.
       targetRepo: row.target_repo ?? null,
       ...(row.dedupe_key ? { dedupeKey: row.dedupe_key } : {}),
+      ...(lastTransitionId !== null ? { lastTransitionId } : {}),
     };
   }
 }

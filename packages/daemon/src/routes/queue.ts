@@ -220,6 +220,9 @@ export function queueRoutes(): Hono {
         : err.code === "dedupe_key_open_elsewhere" ? 409
         : err.code === "dedupe_unsupported" ? 409
         : err.code === "invalid_dedupe_key" ? 400
+        // D4222: an update decided from a stale read, a close of a row that is already closed, and a malformed token.
+        : err.code === "stale_transition" ? 409
+        : err.code === "invalid_expected_transition" ? 400
         // OPR.0.4.6.MH3 FR-4 (C2): a cross-host source-close re-drive naming a
         // DIFFERENT closure_target than the recorded one — someone else closed
         // the source meanwhile; surfaced, never overwritten.
@@ -724,6 +727,7 @@ export function queueRoutes(): Hono {
       wakeAfterSeconds?: number;
       summary?: string | null;
       evidenceRef?: string | null;
+      expectedTransitionId?: unknown;
     }>().catch(() => ({} as never));
     // P21 I3 — the actor is the transport-derived sender (X-OpenRig-Session), NEVER a body claim.
     // P18 deliver-and-label: absent header + a body actor → claimed:v1; absent + no body → 400
@@ -754,6 +758,8 @@ export function queueRoutes(): Hono {
         wakeAfterSeconds: body.wakeAfterSeconds,
         summary: body.summary,
         evidenceRef: body.evidenceRef,
+        // D4222: validated by the repository, so a wrong kind is a named 400 and not a silent drop.
+        expectedTransitionId: body.expectedTransitionId as number | null | undefined,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
       return c.json(item);
