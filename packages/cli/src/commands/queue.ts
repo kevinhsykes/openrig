@@ -555,6 +555,10 @@ async function readBackCreate(deps: QueueDeps, client: DaemonClient, hostId: str
   }
 }
 
+/** `rig queue update` named a terminal state the row already held: nothing was closed. Not 1 (a refusal or failure), not 2
+ *  (outcome unknown), and not 3 (a workflow failure): a script can tell "not closed" from a real failure. */
+export const EXIT_QUEUE_ALREADY_TERMINAL = 4;
+
 async function printWriteResult(client: DaemonClient, json: boolean, body: unknown, status: number, receipt: ReceiptContext | null): Promise<void> {
   const settled = receipt && status < 400 ? await settleReceiptHost(client, receipt) : null;
   const projected = settled ? buildWriteReceipt(body, settled) : null;
@@ -886,6 +890,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
     .option("--human-questions-file <path>", "#193: JSON array of 1-4 questions for a decision, each {id, question, options: [{id, label, recommended?}]} with 2-4 options; Slack shows them as buttons")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
+    .option("--dedupe-key <key>", "Keep at most one OPEN row per destination and key: when one is open, it is returned and nothing is written (a closed row frees the key). 1 to 200 characters. A daemon that cannot keep the key unique is reported, not silently trusted")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
     .option("--verify", "Boundedly wait after persistence for the existing receipts: the gateway receipt for a person, or the wake result and any claim already present for a seat, plus the gateway receipt when the gateway may also post to that seat (a registered person with a pane; eligible to post, not guaranteed). Never retries the create or the wake, and never claims the message was read")
@@ -913,6 +918,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       humanQuestionsFile?: string;
       summary?: string;
       evidenceRef?: string;
+      dedupeKey?: string;
       host?: string;
       nudge?: boolean;
       verify?: boolean;
@@ -1053,6 +1059,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           humanQuestions,
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
+          ...(opts.dedupeKey !== undefined ? { dedupeKey: opts.dedupeKey } : {}),
           priority: opts.priority,
           tier: opts.tier,
           tags,
@@ -1070,6 +1077,18 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           const createWarning = created?.createWarning as { code?: unknown; message?: unknown } | undefined;
           if (status < 400 && createWarning?.code === "qitem_body_not_saved" && typeof createWarning.message === "string") {
             console.error(`Warning: ${createWarning.message}`);
+          }
+          // A daemon that predates --dedupe-key drops the field and answers as if it had been kept, so the key is
+          // trusted only when the answer echoes it. The row, if any, was already written: say so, and fail.
+          if (opts.dedupeKey !== undefined && status < 400) {
+            const wanted = opts.dedupeKey.trim();
+            if (created?.dedupeKey !== wanted) {
+              console.error(`Error: this daemon did not confirm dedupe key '${wanted}', so it cannot keep it unique. ${typeof created?.qitemId === "string" ? `Row ${created.qitemId} WAS created without dedupe; close it if it duplicates another.` : "The create may have written a row without dedupe."}`);
+              process.exitCode = 1;
+            } else if (created.deduped === true) {
+              const raises = typeof created.coalescedCount === "number" ? ` Raise ${created.coalescedCount} is recorded on it (rig queue transitions ${String(created.qitemId)}).` : "";
+              console.error(`Deduplicated: open row ${String(created.qitemId)} already holds dedupe key '${wanted}' at ${hostResolved.destination}.${raises} No new row was created; the request ID ${qitemId} was not used.`);
+            }
           }
           // An ask to a shared channel was accepted; nothing there will answer it (0.7.3).
           const advisories = Array.isArray(created?.advisories) ? created.advisories as Array<{ code?: unknown; message?: unknown }> : [];
@@ -1180,6 +1199,11 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--summary <text>", "Summary persisted onto the item (human-seat parks, or standalone summary update without --state)")
     .option("--evidence-ref <path>", "Pointer to the durable artifact, persisted onto the item on a human-seat park or a done close (--state done)")
     .option("--note <text>", "Transition note for the audit log")
+    .addHelpText("after", `
+Exit codes: 0 done; 1 refused or failed (a 409 stale_transition is a named refusal and exits 1); 2 the outcome is unknown;
+4 the row was ALREADY in the terminal state you named, so nothing was closed (the answer says alreadyTerminal:true with the
+machine code already_terminal; the note you sent was appended). A script must treat 4 as "not closed", not as success.`)
+    .option("--expect-transition <id>", "Refuse unless the row's newest transition is <id> (the lastTransitionId `rig queue show` printed when you decided). A close decided from a stale read then fails with stale_transition instead of reaching a row that has since been reopened or re-raised. A daemon that cannot enforce it is reported before anything is sent")
     .option("--full", "Print the whole response row(s) as today, even when output.compact is on (the receipt's waiting keeps only blocker and nextBackstop)")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: {
@@ -1195,9 +1219,19 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       summary?: string;
       evidenceRef?: string;
       note?: string;
+      expectTransition?: string;
       json?: boolean;
       full?: boolean;
     }) => {
+      // --expect-transition is checked here, before anything is sent: a token the daemon would have to guess at is
+      // refused, and so is one that cannot be enforced.
+      if (opts.expectTransition !== undefined && !/^[1-9][0-9]*$/.test(opts.expectTransition.trim())) {
+        const message = `--expect-transition needs the lastTransitionId \`rig queue show\` printed: a positive whole number (got '${opts.expectTransition}'). Nothing was sent.`;
+        if (opts.json) console.error(JSON.stringify({ error: "invalid_expect_transition", message }));
+        else console.error(message);
+        process.exitCode = 1;
+        return;
+      }
       // --resolution is checked here, before anything is sent: it names the outcome of a close, so it
       // needs a closing --state and some text. The daemon ignores it anywhere else.
       if (opts.resolution !== undefined) {
@@ -1219,6 +1253,23 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
       if (!requireSeatSession("actor")) return;
       const deps = getDeps();
       await withClient(deps, async (client) => {
+        // An older daemon copies named body fields and drops the one it does not know, then answers as if it had been
+        // enforced. Read the row first: a daemon that does not report lastTransitionId cannot enforce the token, so
+        // nothing is sent. (The write is still checked by the daemon in its own transaction.)
+        if (opts.expectTransition !== undefined) {
+          const seen = await client.get<Record<string, unknown>>(`/api/queue/${encodeURIComponent(qitemId)}`);
+          if (seen.status >= 400) {
+            await printQueueItemResult(client, qitemId, opts.json ?? false, seen.data, seen.status, writeReceipt(opts.full, { verb: "update" }));
+            return;
+          }
+          if (typeof seen.data?.lastTransitionId !== "number") {
+            const message = `This daemon does not report lastTransitionId, so it cannot enforce --expect-transition ${opts.expectTransition.trim()}. Nothing was sent.`;
+            if (opts.json) console.error(JSON.stringify({ error: "expect_transition_unsupported", message }));
+            else console.error(message);
+            process.exitCode = 1;
+            return;
+          }
+        }
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/update`, {
           state: opts.state,
           reopen: opts.reopen,
@@ -1231,8 +1282,22 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           transitionNote: opts.note,
+          ...(opts.expectTransition !== undefined ? { expectedTransitionId: Number(opts.expectTransition.trim()) } : {}),
         });
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, { verb: "update" }));
+        // D4222: a close decided from a stale read is refused by name. The body above already says which error; this line
+        // makes it unmissable on stderr.
+        const refusal = res.data as { error?: unknown; message?: unknown } | undefined;
+        if (res.status === 409 && refusal?.error === "stale_transition") {
+          console.error(`Refused: stale_transition: ${typeof refusal.message === "string" ? refusal.message : "the row changed since you read it; nothing was changed."}`);
+        }
+        // S8a keeps a same-state reassertion on a closed row an append. It is not a close, and a script must not read it as
+        // one: the warning is a machine code on stderr and the exit is the distinct, documented EXIT_QUEUE_ALREADY_TERMINAL.
+        const warned = res.data as { alreadyTerminal?: unknown; updateWarning?: { code?: unknown; message?: unknown } } | undefined;
+        if (res.status < 400 && warned?.alreadyTerminal === true) {
+          console.error(`Warning: ${String(warned.updateWarning?.code ?? "already_terminal")}: ${typeof warned.updateWarning?.message === "string" ? warned.updateWarning.message : `row ${qitemId} was already in that terminal state; nothing was closed.`}`);
+          process.exitCode = EXIT_QUEUE_ALREADY_TERMINAL;
+        }
       });
     });
 
