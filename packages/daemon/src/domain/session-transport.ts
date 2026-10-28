@@ -39,7 +39,7 @@ import type { AgentActivity } from "./types.js";
 import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
-import { isBareTerminalSeat, isBoundTerminalSeat, terminalSeatExpectsAgent, terminalSeatHostsAgent } from "./terminal-seat.js";
+import { isAgentPaneCommand, isBareTerminalSeat, isBoundTerminalSeat, terminalSeatExpectsAgent, terminalSeatHostsAgent } from "./terminal-seat.js";
 import { resolveGuardTarget } from "./seat-delivery-guard.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -2418,13 +2418,24 @@ export class SessionTransport {
     const target = resolveGuardTarget(this.db, sessionName);
     if (!target?.pane) return null;
     const node = this.db.prepare("SELECT logical_id AS logicalId FROM nodes WHERE id = ?").get(target.nodeId) as { logicalId: string } | undefined;
-    // P27: a seat recorded as holding an agent gets the same live check as one whose startup launches an agent; the record can be old.
-    if (!node || !(terminalSeatHostsAgent(this.db, sessionName) || terminalSeatExpectsAgent(this.db, (nodeId) => this.rigRepo.getNodeLaunchRecipe(nodeId), { id: target.nodeId, logicalId: node.logicalId }))) return null;
+    // P27/P27b: a seat RECORDED as holding an agent is typed into only while its live pane is a known agent: a shell, the person's
+    // TUI (`node`), an unlisted command and an unreadable pane are all held. The record can be old, so it never decides alone.
+    // A seat that only EXPECTS an agent (its startup launches one, P18) keeps the P18 rule: held only at a bare shell.
+    if (!node) return null;
+    const recordedAgent = terminalSeatHostsAgent(this.db, sessionName);
+    if (!recordedAgent && !terminalSeatExpectsAgent(this.db, (nodeId) => this.rigRepo.getNodeLaunchRecipe(nodeId), { id: target.nodeId, logicalId: node.logicalId })) return null;
     const pane = target.pane;
     // Everything above is synchronous, so a send to any other seat starts its first tmux call in the same turn as before.
     return (async () => {
-      let command: string | null;
-      try { command = await this.tmuxAdapter.getPaneCommand(pane); } catch { return null; }
+      let command: string | null = null;
+      let read = true;
+      try { command = await this.tmuxAdapter.getPaneCommand(pane); } catch { read = false; }
+      if (recordedAgent && !(command && isShellForeground(command)) && !isAgentPaneCommand(command)) {
+        return {
+          ok: false, sessionName, sent: false, outcome: "failed", reason: "terminal_foreground_not_agent",
+          error: `Held, nothing typed: ${sessionName} is recorded as running an agent, but its pane ${pane} is running ${read && command?.trim() ? `"${command.replace(/^-/, "")}"` : "a command that could not be read"}, which is not a known agent, so the message could reach a program that is not an agent (the person's TUI, a prompt). Restart the seat's agent, then send again.`,
+        } as SendResult;
+      }
       if (!command || !isShellForeground(command)) return null;
       return {
         ok: false, sessionName, sent: false, outcome: "failed", reason: "terminal_agent_not_running",
@@ -2709,6 +2720,9 @@ export class SessionTransport {
 
   private async sendUnguarded(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     sessionName = physicalSessionName(this.db, sessionName);
+    // P27b: the last step before anything is typed. Retained/guarded delivery calls this directly, not through sendClassified, so the
+    // live-pane check is repeated here; it costs one tmux read, and only for a terminal seat that hosts or expects an agent.
+    { const hold = this.terminalAgentNotRunning(sessionName, opts); if (hold) { const held = await hold; if (held) return held; } }
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;

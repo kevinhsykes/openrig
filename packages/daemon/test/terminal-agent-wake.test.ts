@@ -3,7 +3,7 @@ import { createFullTestDb } from "./helpers/test-app.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { QueueRepository } from "../src/domain/queue-repository.js";
 import { OutboxHandler } from "../src/domain/outbox-handler.js";
-import { isBoundTerminalSeat, isBareTerminalSeat, terminalSeatHostsAgent, AGENT_PANE_COMMANDS } from "../src/domain/terminal-seat.js";
+import { isAgentPaneCommand, isBoundTerminalSeat, isBareTerminalSeat, terminalSeatHostsAgent, AGENT_PANE_COMMANDS } from "../src/domain/terminal-seat.js";
 import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js";
 
 // P27 (live regression after the 22:09Z install): OpenRig 0.7.1 refuses every queue wake to a `runtime: terminal` seat
@@ -12,7 +12,7 @@ import { outboxEntriesSchema } from "../src/db/migrations/027_outbox_entries.js"
 // Not the startup record: the human's TUI (`rig tui`) has a fresh-start action too, and its pane is `node`.
 const EVIDENCE = "evidence/x.md";
 
-function seat(db: ReturnType<typeof createFullTestDb>, logicalId: string, session: string, opts: { runtime?: string; command?: string | null; recordedPane?: string; boundPane?: string } = {}) {
+function seat(db: ReturnType<typeof createFullTestDb>, logicalId: string, session: string, opts: { runtime?: string; command?: string | null; recordedPane?: string; boundPane?: string; recordedSession?: string } = {}) {
   db.prepare("INSERT OR IGNORE INTO rigs (id, name) VALUES ('rig-t', 'rigt')").run();
   const nodeId = `node-${logicalId}`;
   db.prepare("INSERT INTO nodes (id, rig_id, logical_id, runtime) VALUES (?, 'rig-t', ?, ?)").run(nodeId, logicalId, opts.runtime ?? "terminal");
@@ -20,7 +20,7 @@ function seat(db: ReturnType<typeof createFullTestDb>, logicalId: string, sessio
   db.prepare("INSERT INTO bindings (id, node_id, attachment_type, tmux_session, tmux_pane) VALUES (?, ?, 'tmux', ?, ?)").run(`b-${logicalId}`, nodeId, session, opts.boundPane ?? "%5");
   if (opts.command !== undefined) {
     db.prepare("INSERT INTO seat_identity_verdicts (node_id, verdict, observed_command, registered_pane, session_name, observed_at) VALUES (?, 'verified', ?, ?, ?, ?)")
-      .run(nodeId, opts.command, opts.recordedPane ?? opts.boundPane ?? "%5", session, new Date().toISOString());
+      .run(nodeId, opts.command, opts.recordedPane ?? opts.boundPane ?? "%5", opts.recordedSession ?? session, new Date().toISOString());
   }
 }
 
@@ -50,6 +50,23 @@ describe("terminalSeatHostsAgent / isBareTerminalSeat", () => {
     seat(db, "workers.s", "workers-s@rigt", { command: "pi", recordedPane: "%9", boundPane: "%5" });
     expect(terminalSeatHostsAgent(db, "workers-s@rigt")).toBe(false);
     expect(isBareTerminalSeat(db, "workers-s@rigt")).toBe(true);
+  });
+
+  it("a record written for another session name is ignored: a rebuilt or renamed seat keeps its node id (P27b)", () => {
+    seat(db, "workers.r", "workers-r@rigt", { command: "pi", recordedSession: "workers-r@an-older-rig-name" });
+    expect(terminalSeatHostsAgent(db, "workers-r@rigt")).toBe(false);
+    expect(isBareTerminalSeat(db, "workers-r@rigt")).toBe(true);
+  });
+
+  it("a record with no session name at all is ignored", () => {
+    seat(db, "workers.n", "workers-n@rigt", { command: "pi" });
+    db.prepare("UPDATE seat_identity_verdicts SET session_name = NULL WHERE node_id = 'node-workers.n'").run();
+    expect(terminalSeatHostsAgent(db, "workers-n@rigt")).toBe(false);
+  });
+
+  it("isAgentPaneCommand normalises the live command as it does the record", () => {
+    for (const ok of ["pi", " Pi ", "-pi", "Vibe", "command-code"]) expect(isAgentPaneCommand(ok)).toBe(true);
+    for (const no of ["node", "bash", "-bash", "rig", "", "  ", null, undefined]) expect(isAgentPaneCommand(no as never)).toBe(false);
   });
 
   it("a seat of another runtime is not a bare terminal seat", () => {

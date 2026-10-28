@@ -2878,6 +2878,63 @@ describe("SessionTransport", () => {
     expect(sent).toEqual([]);
   });
 
+  // P27b (CRITICAL review of c2e2deb42): the live check must be POSITIVE. It stopped only a shell, so a stale `pi` record
+  // with the person's `rig tui` (a `node` process) now in the pane would have had the wake typed into the TUI.
+  it.each([["node", "the human's rig tui"], ["some-unknown-tool", "an unlisted command"], ["rig", "an unlisted command"]])(
+    "P27b: recorded as pi but the live pane runs %s (%s): nothing is typed, held by name", async (live) => {
+      seedTerminalSeat();
+      recordPane("pi");
+      const sent: string[] = [];
+      const tmux = mockTmux({ getPaneCommand: async () => live, sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+      const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "terminal_foreground_not_agent" });
+      expect(String(result.error)).toContain(live);
+      expect(sent).toEqual([]);
+    });
+
+  it.each([["throws", async () => { throw new Error("tmux gone"); }], ["answers nothing", async () => null], ["answers blank", async () => "  "]])(
+    "P27b: recorded as pi and the live pane cannot be read (%s): held, nothing typed", async (_l, read) => {
+      seedTerminalSeat();
+      recordPane("pi");
+      const sent: string[] = [];
+      const tmux = mockTmux({ getPaneCommand: read as never, sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+      const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, {});
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "terminal_foreground_not_agent" });
+      expect(sent).toEqual([]);
+    });
+
+  it.each([["pi"], ["-pi"], ["Vibe"], ["command-code"]])("P27b: recorded as an agent and the live pane runs %s: typed", async (live) => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => live, sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, {});
+    expect(result.ok).toBe(true);
+    expect(sent).toEqual([H_ENVELOPE]);
+  });
+
+  it("P27b: the last step before typing (sendUnguarded, which retained/guarded delivery calls directly) holds a stale pi + live node too", async () => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "node", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await (createTransport(tmux) as unknown as { sendUnguarded(s: string, t: string, o?: object): Promise<{ ok: boolean; reason?: string }> })
+      .sendUnguarded("infra-ui@term-rig", H_ENVELOPE, {});
+    expect(result).toMatchObject({ ok: false, reason: "terminal_foreground_not_agent" });
+    expect(sent).toEqual([]);
+  });
+
+  it("P27b: a record that belongs to an older session is not an agent record: exactText as for any bare terminal seat", async () => {
+    seedTerminalSeat();
+    recordPane("pi");
+    db.prepare("UPDATE seat_identity_verdicts SET session_name = 'infra-ui@an-earlier-rig-name'").run();   // written for a previous occupant/name
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "pi", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result.envelopeOmitted).toBe(true);
+    expect(sent).toEqual([HEREDOC]);
+  });
+
   it("send to an agent seat ignores exactText and keeps the envelope", async () => {
     seedCanonicalRig();
     const sent: string[] = [];

@@ -8,15 +8,15 @@ export function isBoundTerminalSeat(db: Database.Database, sessionName: string):
   return boundTerminalNode(db, sessionName) !== null;
 }
 
-function boundTerminalNode(db: Database.Database, sessionName: string): { nodeId: string; pane: string | null } | null {
+function boundTerminalNode(db: Database.Database, sessionName: string): { nodeId: string; pane: string | null; tmuxSession: string | null } | null {
   try {
     const target = resolveGuardTarget(db, sessionName);
     if (!target) return null;
     const current = db.prepare(
-      `SELECT n.runtime AS runtime, b.tmux_pane AS pane FROM nodes n JOIN bindings b ON b.node_id = n.id
+      `SELECT n.runtime AS runtime, b.tmux_pane AS pane, b.tmux_session AS tmuxSession FROM nodes n JOIN bindings b ON b.node_id = n.id
         WHERE n.id = ? AND (b.tmux_session = ? OR b.tmux_pane = ?)`,
-    ).get(target.nodeId, sessionName, sessionName) as { runtime: string | null; pane: string | null } | undefined;
-    return current?.runtime === "terminal" ? { nodeId: target.nodeId, pane: current.pane } : null;
+    ).get(target.nodeId, sessionName, sessionName) as { runtime: string | null; pane: string | null; tmuxSession: string | null } | undefined;
+    return current?.runtime === "terminal" ? { nodeId: target.nodeId, pane: current.pane, tmuxSession: current.tmuxSession } : null;
   } catch {
     return null;
   }
@@ -30,21 +30,29 @@ function boundTerminalNode(db: Database.Database, sessionName: string): { nodeId
  */
 export const AGENT_PANE_COMMANDS: ReadonlySet<string> = new Set(["pi", "command-code", "vibe", "claude", "codex"]);
 
+/** Whether a pane command (as tmux reports it, or as recorded) is a known agent. One normalisation for the record and the live pane. */
+export function isAgentPaneCommand(command: string | null | undefined): boolean {
+  return typeof command === "string" && AGENT_PANE_COMMANDS.has(command.trim().replace(/^-/, "").toLowerCase());
+}
+
 /**
  * P27: whether a bound terminal seat hosts an agent, by what the daemon last RECORDED as holding its current pane
  * (seat_identity_verdicts.observed_command). The seat's startup record is deliberately not used: the human's TUI has a
  * fresh-start action too. No record, a record for another pane, an unlisted command or an unreadable database all read as
- * "no agent". The record can be old, so a send still re-checks the live pane (see SessionTransport.terminalAgentNotRunning).
+ * "no agent". The record can be old, so it is never the authority: every typed send re-reads the live pane and types only when
+ * that is a known agent too (SessionTransport.terminalAgentNotRunning). No freshness limit is needed on the record for that reason.
  */
 export function terminalSeatHostsAgent(db: Database.Database, sessionName: string): boolean {
   try {
     const node = boundTerminalNode(db, sessionName);
     if (!node) return false;
-    const row = db.prepare("SELECT observed_command AS command, registered_pane AS pane FROM seat_identity_verdicts WHERE node_id = ?")
-      .get(node.nodeId) as { command: string | null; pane: string | null } | undefined;
+    const row = db.prepare("SELECT observed_command AS command, registered_pane AS pane, session_name AS session FROM seat_identity_verdicts WHERE node_id = ?")
+      .get(node.nodeId) as { command: string | null; pane: string | null; session: string | null } | undefined;
     if (!row?.command) return false;
+    // The record must be about THIS seat's current session (a rebuilt or renamed seat keeps its node id) and this pane.
+    if (!row.session || !node.tmuxSession || row.session !== node.tmuxSession) return false;
     if (row.pane && node.pane && row.pane !== node.pane) return false;
-    return AGENT_PANE_COMMANDS.has(row.command.trim().replace(/^-/, "").toLowerCase());
+    return isAgentPaneCommand(row.command);
   } catch {
     return false;
   }
