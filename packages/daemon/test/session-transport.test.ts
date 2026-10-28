@@ -2850,6 +2850,75 @@ describe("SessionTransport", () => {
     expect(sent).toEqual([H_ENVELOPE]);
   });
 
+  // P18 (R5 Q2): a terminal seat whose agent should be running, but whose pane is a bare shell, would run the typed message as
+  // shell commands. Held with a named reason instead. A plain shell seat (nothing launches an agent in it) is unchanged.
+  describe("a terminal seat that should run an agent but sits at a bare shell", () => {
+    const LAUNCH = { type: "send_text", value: "pi --continue", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true };
+    function seedAgentTerminalSeat(opts: { record?: unknown[]; declared?: unknown[] }) {
+      const rig = rigRepo.createRig("term-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-infra", rig.id, "infra", "Infra");
+      const rigSpec = { version: "0.2", name: "term-rig", edges: [], pods: [{ id: "infra", label: "Infra", edges: [],
+        members: [{ id: "ui", agentRef: "local:agents/ui", profile: "default", runtime: "terminal", cwd: ".", startup: { files: [], actions: opts.declared ?? [] } }] }] };
+      const node = rigRepo.addNode(rig.id, "infra.ui", { role: "ui", runtime: "terminal", podId: "pod-infra", launchRecipe: { version: 1, rigRoot: "/workspace/term-rig", rigSpec: rigSpec as never } });
+      const session = sessionRegistry.registerSession(node.id, "infra-ui@term-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig", tmuxPane: "%4" });
+      if (opts.record) {
+        db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, 'terminal')")
+          .run(node.id, JSON.stringify(opts.record));
+      }
+    }
+    function sendInto(command: string | null) {
+      const typed: string[] = [];
+      const tmux = mockTmux({
+        getPaneCommand: async () => command,
+        sendText: async (_t: string, text: string) => { typed.push(text); return { ok: true }; },
+      });
+      return { typed, run: (opts: Record<string, unknown> = {}) => createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: "make test", ...opts } as never) };
+    }
+
+    it.each([
+      ["its record holds a launch action", { record: [LAUNCH] }],
+      ["its record is empty but its stored spec declares one (the incident)", { record: [], declared: [LAUNCH] }],
+    ])("holds the message, types nothing, and names the reason when %s", async (_label, seat) => {
+      seedAgentTerminalSeat(seat);
+      const { typed, run } = sendInto("-bash");
+      const result = await run();
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "terminal_agent_not_running" });
+      expect(result.error).toContain("infra-ui@term-rig");
+      expect(result.error).toContain("%4");
+      expect(typed).toEqual([]);
+    });
+
+    it("delivers when the pane foreground is an agent", async () => {
+      seedAgentTerminalSeat({ record: [LAUNCH], declared: [LAUNCH] });
+      const { typed, run } = sendInto("node");
+      expect(await run()).toMatchObject({ ok: true });
+      expect(typed).toEqual(["make test"]);
+    });
+
+    it("an unreadable pane is not evidence of a bare shell: it delivers as before", async () => {
+      seedAgentTerminalSeat({ record: [LAUNCH] });
+      const { typed, run } = sendInto(null);
+      expect(await run()).toMatchObject({ ok: true });
+      expect(typed).toEqual(["make test"]);
+    });
+
+    it("a plain shell seat (no launch action anywhere) still receives commands at its prompt", async () => {
+      seedAgentTerminalSeat({ record: [], declared: [] });
+      const { typed, run } = sendInto("zsh");
+      expect(await run()).toMatchObject({ ok: true });
+      expect(typed).toEqual(["make test"]);
+    });
+
+    it("an explicit interactive send is the operator's call and is not held", async () => {
+      seedAgentTerminalSeat({ record: [LAUNCH] });
+      const { run } = sendInto("bash");
+      const result = await run({ dangerouslyInteract: true });
+      expect(result.reason).not.toBe("terminal_agent_not_running");
+    });
+  });
+
   it("enveloped fan-out to a terminal seat and an agent seat gives each the right text", async () => {
     seedCanonicalRig(); // dev-impl@my-rig, claude-code
     seedTerminalSeat(); // infra-ui@term-rig, terminal

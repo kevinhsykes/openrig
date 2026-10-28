@@ -39,7 +39,8 @@ import type { AgentActivity } from "./types.js";
 import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
-import { isBoundTerminalSeat } from "./terminal-seat.js";
+import { isBoundTerminalSeat, terminalSeatExpectsAgent } from "./terminal-seat.js";
+import { resolveGuardTarget } from "./seat-delivery-guard.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
 import { isShellForeground } from "./shell-classifier.js";
@@ -2405,7 +2406,37 @@ export class SessionTransport {
     return { ...result, urgent: opts.urgent };
   }
 
+  /**
+   * P18 (R5 Q2): a terminal seat that is supposed to run an agent, but whose pane foreground is a bare shell, would run the
+   * typed message as shell commands. Hold it with a named reason and type nothing. An explicit interactive send, a submit-only
+   * retry, a plain shell seat (nothing launches an agent in it) and a pane that cannot be read all go through as before: an
+   * unreadable pane is not evidence of a bare shell.
+   */
+  private terminalAgentNotRunning(sessionName: string, opts?: SendOpts): Promise<SendResult | null> | null {
+    if (opts?.dangerouslyInteract || opts?.submitOnly || !isBoundTerminalSeat(this.db, sessionName)) return null;
+    const target = resolveGuardTarget(this.db, sessionName);
+    if (!target?.pane) return null;
+    const node = this.db.prepare("SELECT logical_id AS logicalId FROM nodes WHERE id = ?").get(target.nodeId) as { logicalId: string } | undefined;
+    if (!node || !terminalSeatExpectsAgent(this.db, (nodeId) => this.rigRepo.getNodeLaunchRecipe(nodeId), { id: target.nodeId, logicalId: node.logicalId })) return null;
+    const pane = target.pane;
+    // Everything above is synchronous, so a send to any other seat starts its first tmux call in the same turn as before.
+    return (async () => {
+      let command: string | null;
+      try { command = await this.tmuxAdapter.getPaneCommand(pane); } catch { return null; }
+      if (!command || !isShellForeground(command)) return null;
+      return {
+        ok: false, sessionName, sent: false, outcome: "failed", reason: "terminal_agent_not_running",
+        error: `Held, nothing typed: ${sessionName} is meant to run an agent, but its pane ${pane} is at a bare shell ("${command.replace(/^-/, "")}"), so the message would run as shell commands. Restart the seat's agent, then send again.`,
+      } as SendResult;
+    })();
+  }
+
   private async sendClassified(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
+    const notRunningCheck = this.terminalAgentNotRunning(sessionName, opts);
+    if (notRunningCheck) {
+      const notRunning = await notRunningCheck;
+      if (notRunning) return notRunning;
+    }
     const guard = this.tmuxAdapter.deliveryGuard;
     const admission: AdmissionInput = { source: opts?.openrigNotice ? "openrig" : "agent", urgent: !!opts?.urgent, override: opts?.dangerouslyInteract === true };
     if (!guard) {

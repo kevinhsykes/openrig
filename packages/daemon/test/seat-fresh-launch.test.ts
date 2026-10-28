@@ -512,6 +512,57 @@ describe("SeatLifecycleService.launchFresh", () => {
     expect(tmux.createSession).not.toHaveBeenCalled();
   });
 
+  // P18 (R5 Q1-a): the spec is read once, at creation; a persisted record that lost the seat's launch actions is trusted
+  // forever. A terminal seat whose stored recipe still declares fresh-start actions while its record holds none is spec drift.
+  describe("terminal spec drift", () => {
+    const LAUNCH = { type: "send_text", value: "pi --continue", phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true };
+    function seedTerminalWithRecipe(opts: { declared: unknown[]; level?: "member" | "pod"; record?: unknown[]; runtime?: "terminal" | "claude-code" }) {
+      const runtime = opts.runtime ?? "terminal";
+      const rig = rigRepo.createRig("fresh-rig");
+      db.prepare("INSERT INTO pods (id, rig_id, namespace, label) VALUES (?, ?, ?, ?)").run("pod-dev", rig.id, "dev", "Dev");
+      const startup = { files: [], actions: opts.declared };
+      const rigSpec = {
+        version: "0.2", name: "fresh-rig", edges: [],
+        pods: [{ id: "dev", label: "Dev", edges: [], ...(opts.level === "pod" ? { startup } : {}),
+          members: [{ id: "impl", agentRef: "local:agents/impl", profile: "default", runtime, cwd: ".", ...(opts.level === "pod" ? {} : { startup }) }] }],
+      };
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime, cwd: "/project", podId: "pod-dev", launchRecipe: { version: 1, rigRoot: "/workspace/fresh-rig", rigSpec: rigSpec as never } });
+      db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, ?)")
+        .run(node.id, JSON.stringify(opts.record ?? []), runtime);
+      return node;
+    }
+
+    it.each(["member", "pod"] as const)("refuses, naming drift, when the %s spec declares a fresh-start action and the record holds none", async (level) => {
+      seedTerminalWithRecipe({ declared: [LAUNCH], level });
+      const plan = await service.planFresh({ seatRef: "dev.impl", fresh: true });
+      expect(plan).toMatchObject({ ok: false, planOnly: true, launchable: false, code: "startup_context_drift" });
+      const run = await service.launchFresh({ seatRef: "dev.impl", fresh: true, reason: "x" });
+      expect(run).toMatchObject({ ok: false, code: "startup_context_drift" });
+      expect(JSON.stringify(run)).toContain("dev.impl");
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("does not call it drift when the record holds the action, the spec declares none, or the declared action never applies to a fresh start", async () => {
+      seedTerminalWithRecipe({ declared: [LAUNCH], record: [LAUNCH] });
+      expect(await service.planFresh({ seatRef: "dev.impl", fresh: true })).not.toMatchObject({ code: "startup_context_drift" });
+      db.prepare("DELETE FROM node_startup_context").run(); db.prepare("DELETE FROM nodes").run(); db.prepare("DELETE FROM pods").run(); db.prepare("DELETE FROM rigs").run();
+      seedTerminalWithRecipe({ declared: [] });
+      expect(await service.planFresh({ seatRef: "dev.impl", fresh: true })).not.toMatchObject({ code: "startup_context_drift" });
+      db.prepare("DELETE FROM node_startup_context").run(); db.prepare("DELETE FROM nodes").run(); db.prepare("DELETE FROM pods").run(); db.prepare("DELETE FROM rigs").run();
+      seedTerminalWithRecipe({ declared: [{ ...LAUNCH, appliesOn: ["restore"] }] });
+      expect(await service.planFresh({ seatRef: "dev.impl", fresh: true })).not.toMatchObject({ code: "startup_context_drift" });
+    });
+
+    it("is for terminal seats only, and a seat with no stored recipe is not refused for want of a spec to compare", async () => {
+      seedTerminalWithRecipe({ declared: [LAUNCH], runtime: "claude-code" });
+      expect(await service.planFresh({ seatRef: "dev.impl", fresh: true })).not.toMatchObject({ code: "startup_context_drift" });
+      db.prepare("DELETE FROM node_startup_context").run(); db.prepare("DELETE FROM nodes").run(); db.prepare("DELETE FROM pods").run(); db.prepare("DELETE FROM rigs").run();
+      const bare = seedSeat({ clean: true, runtime: "terminal" });
+      db.prepare("UPDATE node_startup_context SET startup_actions_json = '[]' WHERE node_id = ?").run(bare.node.id);
+      expect(await service.planFresh({ seatRef: "dev.impl", fresh: true })).not.toMatchObject({ code: "startup_context_drift" });
+    });
+  });
+
   it("reports typing protection without acquiring or modifying a lifecycle lock", async () => {
     const seat = seedSeat({ clean: true });
     const lifecycle = vi.fn();
