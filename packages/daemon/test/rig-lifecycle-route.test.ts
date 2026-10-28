@@ -804,4 +804,66 @@ describe("Rig lifecycle routes", () => {
     const podEvents = db.prepare("SELECT type FROM events WHERE type = 'pod.deleted'").all() as Array<{ type: string }>;
     expect(podEvents).toHaveLength(0);
   });
+
+  // P9 — a fallback destination must be DELIVERABLE, not merely a running seat: the same
+  // classification seam queue writes consult decides, and refusals carry the seam's teaching.
+  describe("fallback destination deliverability (P9)", () => {
+    const expandTwo = async (rigName: string) => {
+      migrate(db, ALL_MIGRATIONS);
+      const rig = setup.rigRepo.createRig(rigName);
+      const expand = (id: string, member: string) => setup.rigExpansionService.expand({ rigId: rig.id,
+        pod: { id, label: id, members: [{ id: member, runtime: "terminal", agentRef: "builtin:terminal", profile: "none", cwd: "/tmp" }], edges: [] } });
+      const worker = await expand("infra", "server");
+      const receiver = await expand("safe", "fallback");
+      expect(worker.ok && receiver.ok).toBe(true);
+      if (!worker.ok || !receiver.ok) throw new Error("expansion failed");
+      Object.assign(setup.tmuxAdapter, { deliveryGuard: new SeatDeliveryGuard(db, name => resolveGuardTarget(db, name)) });
+      return { rig, session: worker.nodes[0]!.sessionName, fallbackSession: receiver.nodes[0]!.sessionName };
+    };
+
+    it.each(["nodes/infra.server", "pods/infra"])("refuses an unroutable fallback destination before rerouting anything (%s)", async (target) => {
+      const { rig, session, fallbackSession } = await expandTwo("unroutable-fallback");
+      const queue = new QueueRepository(db, setup.eventBus);
+      vi.mocked(setup.tmuxAdapter.hasSession).mockResolvedValue(true);
+      const qitem = (await queue.create({ sourceSession: `source@unroutable-fallback`, destinationSession: session,
+        body: "must not move to an undeliverable address", nudge: false })).qitemId;
+      // The fallback seat keeps its session row and its tmux session, but its terminal binding is
+      // gone: nothing can hold the address any more, so queue writes would strand every row.
+      db.prepare("DELETE FROM bindings WHERE tmux_session = ?").run(fallbackSession);
+
+      const response = await setup.app.request(`/api/rigs/${rig.id}/${target}?fallback=${encodeURIComponent(fallbackSession)}`, { method: "DELETE" });
+      expect(response.status).toBe(409);
+      const result = await response.json();
+      expect(result).toMatchObject({ ok: false, code: "fallback_unroutable" });
+      expect(result.error).toContain("unroutable:");
+      expect(result.error).toContain(fallbackSession);
+      expect(queue.getById(qitem)?.destinationSession).toBe(session);
+      expect(setup.rigRepo.getRig(rig.id)!.nodes.map(node => node.logicalId)).toContain("infra.server");
+    });
+
+    it("refuses late rerouting when the fallback decays to unroutable while tmux stops", async () => {
+      const { rig, session, fallbackSession } = await expandTwo("decay-fallback");
+      const queue = new QueueRepository(db, setup.eventBus);
+      vi.mocked(setup.tmuxAdapter.hasSession).mockResolvedValue(true);
+      const early = (await queue.create({ sourceSession: "source@decay-fallback", destinationSession: session,
+        body: "queued before removal", nudge: false })).qitemId;
+      let late = "";
+      vi.mocked(setup.tmuxAdapter.killSession).mockImplementationOnce(async () => {
+        late = (await queue.create({ sourceSession: "source@decay-fallback", destinationSession: session,
+          body: "accepted while tmux was stopping", nudge: false })).qitemId;
+        db.prepare("DELETE FROM bindings WHERE tmux_session = ?").run(fallbackSession);
+        return { ok: true };
+      });
+
+      const response = await setup.app.request(`/api/rigs/${rig.id}/nodes/infra.server?fallback=${encodeURIComponent(fallbackSession)}`, { method: "DELETE" });
+      expect(response.status).toBe(409);
+      const result = await response.json();
+      expect(result).toMatchObject({ ok: false, code: "fallback_unroutable", sessionsKilled: 1,
+        reroutedQitemIds: [early], retained: true, sessionStopped: true, fallbackDestination: fallbackSession });
+      expect(result.error).toContain("no longer deliverable");
+      expect(result.error).toContain("unroutable:");
+      expect(queue.getById(late)?.destinationSession).toBe(session);
+      expect(setup.rigRepo.getRig(rig.id)!.nodes.map(node => node.logicalId)).toContain("infra.server");
+    });
+  });
 });

@@ -962,6 +962,7 @@ rigsRoutes.delete("/:rigId/pods/:podRef", async (c) => {
       : result.code === "active_qitems" ? 409
       : result.code === "fallback_not_running" ? 409
       : result.code === "fallback_in_target" ? 409
+      : result.code === "fallback_unroutable" ? 409
       : result.code === "kill_failed" ? 409
       : 500;
     return c.json(result, status);

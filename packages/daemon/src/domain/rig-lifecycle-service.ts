@@ -41,7 +41,7 @@ type RigReleaseRow = {
 
 type FallbackValidationFailure = {
   ok: false;
-  code: "fallback_not_running" | "fallback_in_target";
+  code: "fallback_not_running" | "fallback_in_target" | "fallback_unroutable";
   error: string;
 };
 
@@ -532,6 +532,17 @@ export class RigLifecycleService {
       const invalidFallback = shrinkTarget ? await this.validateFallbackDestination(fallbackDestination, targetNodeIds) : null;
       if (invalidFallback) return { ...invalidFallback, activeQitemIds };
       for (const qitemId of activeQitemIds) {
+        // P9 — the destination is re-classified immediately before each write: a seat that stops
+        // being deliverable between validation and this row would strand exactly that row.
+        const refusal = this.fallbackClassificationFailure(fallbackDestination);
+        if (refusal) {
+          return {
+            ...refusal,
+            activeQitemIds,
+            error: `qitem ${qitemId} not rerouted: ${refusal.error} ` +
+              `No queue or topology changes were made after that row.`,
+          };
+        }
         this.queueRepo.routeToFallback(qitemId, fallbackDestination, `explicit fallback while removing node ${node.logical_id}`);
       }
     }
@@ -564,6 +575,13 @@ export class RigLifecycleService {
       lateFallbackFailure = await this.validateFallbackDestination(fallbackDestination, targetNodeIds);
       if (!lateFallbackFailure) {
         for (const qitemId of lateQitemIds) {
+          // P9 — same per-row re-classification as the pre-kill loop: the refusal names the row
+          // it stopped at, and that row (and any after it) keeps its current destination.
+          const refusal = this.fallbackClassificationFailure(fallbackDestination);
+          if (refusal) {
+            lateFallbackFailure = { ...refusal, error: `qitem ${qitemId} not rerouted: ${refusal.error}` };
+            break;
+          }
           this.queueRepo.routeToFallback(qitemId, fallbackDestination, `explicit fallback while removing node ${node.logical_id}`);
           if (!activeQitemIds.includes(qitemId)) activeQitemIds.push(qitemId);
         }
@@ -630,7 +648,9 @@ export class RigLifecycleService {
 
     if (remaining.length > 0) {
       const subject = lateFallbackFailure
-        ? `Fallback destination '${fallbackDestination}' is no longer a running seat, so queue work that arrived while removing node '${node.logical_id}' was not rerouted and the node was kept.`
+        ? `Fallback destination '${fallbackDestination}' is no longer deliverable` +
+          (lateFallbackFailure.code === "fallback_unroutable" ? ` (${lateFallbackFailure.error})` : "") +
+          ` — queue work that arrived while removing node '${node.logical_id}' was not rerouted and the node was kept.`
         : `Node '${node.logical_id}' received active queue work during removal and was kept.`;
       const stopped = sessionStopped ? ` Its session '${node.latest_session_name}' was stopped and stays stopped.` : "";
       const rerouted = activeQitemIds.length > 0
@@ -720,6 +740,16 @@ export class RigLifecycleService {
 
     if (fallbackDestination !== undefined) {
       for (const qitemId of activeQitemIds) {
+        // P9 — per-row re-classification, same as removeNode's loops.
+        const refusal = this.fallbackClassificationFailure(fallbackDestination);
+        if (refusal) {
+          return {
+            ...refusal,
+            activeQitemIds,
+            error: `qitem ${qitemId} not rerouted: ${refusal.error} ` +
+              `No queue or topology changes were made after that row.`,
+          };
+        }
         this.queueRepo.routeToFallback(qitemId, fallbackDestination, `explicit fallback while shrinking pod ${pod.namespace}`);
       }
     }
@@ -897,7 +927,24 @@ Shrinking pod '${namespace}' already ${applied.join("; ")}; those changes were n
         error: `Fallback destination '${fallbackDestination}' is not a currently running seat. No queue or topology changes were made.`,
       };
     }
-    return null;
+    return this.fallbackClassificationFailure(fallbackDestination);
+  }
+
+  /** P9 — deliverability, not just liveness: a running seat that no transport can hold (or a
+   *  wake-only hosted member) would strand every row routed to it. The same classification seam
+   *  queue writes consult (OPR.0.5.6.14) decides; only pane-bound seats and gateway-routable
+   *  addresses are accepted, and refusals carry the seam's own teaching. */
+  private fallbackClassificationFailure(fallbackDestination: string): FallbackValidationFailure | null {
+    const cls = this.queueRepo.classifyDestinationOf(fallbackDestination);
+    if (cls.class === "pane-bound" || cls.class === "gateway-routable") return null;
+    return {
+      ok: false,
+      code: "fallback_unroutable",
+      error: cls.class === "unroutable"
+        ? cls.teaching
+        : `unroutable: '${fallbackDestination}' is a hosted member reachable only by roster wake; ` +
+          `queue fallback requires a live seat (pane-bound) or a gateway-routable address.`,
+    };
   }
 
   private resolveNodeRef(rigId: string, nodeRef: string): NodeLifecycleRow | null {
