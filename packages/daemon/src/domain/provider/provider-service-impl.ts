@@ -36,7 +36,7 @@ import type {
 import type { ClaudeConfigDirProbe } from "./claude-config-dir.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderKind, ProviderSignal } from "./provider-types.js";
-import { isKnownProviderKind } from "./provider-types.js";
+import { knownProviderKinds } from "./provider-types.js";
 import { authList, authSave, authSwitch, resolveCodexHome } from "../codex-auth.js";
 import type { PeerReport } from "../seat-restart-in-place.js";
 
@@ -109,7 +109,9 @@ export interface ProviderServiceImplDeps {
   env?: NodeJS.ProcessEnv;
   now?: () => string;
   /** Slice 01: Codex usage windows, served only while `enabled()` (provider.usage_windows) is true. */
-  usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows; claude?: ClaudeUsageWindows; claudeTokens?: import("./claude-token-usage.js").ClaudeTokenUsage };
+  usageWindows?: { enabled: () => boolean; windows: CodexUsageWindows; claude?: ClaudeUsageWindows; claudeTokens?: import("./claude-token-usage.js").ClaudeTokenUsage;
+    /** P4: readings for the subscription rails the quota collector meters, from its availability file; advisory only. */
+    collector?: import("./quota-collector-usage.js").QuotaCollectorUsage };
   /** The logins saved in a Codex home; defaults to `rig auth`'s files. A seat switch acts on the home the seat runs on. */
   codexLogins?: CodexHomeLogins;
   /** What would outrank a Claude seat's own token; without it, Claude seats aren't moved. */
@@ -145,6 +147,10 @@ export class ProviderServiceImpl implements ProviderService {
       }
       return result.signals;
     };
+    // P4: the quota collector's file is a local read (not a probe), repeated at most every 30 s, so a status read shows its rails.
+    // It follows provider.usage_windows like every usage row; a failed read is recorded on its rows and summary, never thrown.
+    const collector = this.usageWindowsEnabled() ? this.deps.usageWindows!.collector : undefined;
+    if (collector) await collector.refreshIfStale();
     const model = collectFourBlockReadModel({
       readCodexAuth: readAuth,
       listSeats,
@@ -166,7 +172,7 @@ export class ProviderServiceImpl implements ProviderService {
       ? { names: profiles, note: "saved rig auth profiles: not read (usage unknown); this reading is only the login active in the daemon's CODEX_HOME" }
       : null;
     const codexRows = savedProfiles ? usage.map((row) => ({ ...row, savedProfiles })) : usage;
-    const allUsage = [...codexRows, ...(this.deps.usageWindows!.claude?.project(asOf) ?? []), ...(this.deps.usageWindows!.claudeTokens?.project(asOf) ?? [])];
+    const allUsage = [...codexRows, ...(this.deps.usageWindows!.claude?.project(asOf) ?? []), ...(this.deps.usageWindows!.claudeTokens?.project(asOf) ?? []), ...(collector?.project(asOf) ?? [])];
     // Each seat's configured account, from the same seat universe and registry metadata (names only), never
     // linked to a usage row.
     const seatAccounts = configuredSeatAccounts({
@@ -178,17 +184,21 @@ export class ProviderServiceImpl implements ProviderService {
       claudeConfigDir: env.CLAUDE_CONFIG_DIR,
       home: env.HOME ?? os.homedir(),
     });
-    return { ...model, usage: allUsage, seatAccounts };
+    return { ...model, usage: allUsage, seatAccounts, ...(collector ? { quotaCollector: collector.summary() } : {}) };
   }
 
   async refreshUsage(provider: ProviderKind, token?: import("./claude-token-usage.js").ClaudeTokenSelection): Promise<UsageRefreshResult | { disabled: true } | { unavailable: true }> {
-    // BR-1 first: a kind outside the known rails has no reader here — { unavailable: true } even
-    // while the switch is off. Known kinds keep the disabled gate below.
-    if (!isKnownProviderKind(provider)) return { unavailable: true };
+    // BR-1 first: a kind this daemon doesn't know (the built-in pair plus the rails registered at load) has no reader here —
+    // { unavailable: true } even while the switch is off. Known kinds keep the disabled gate below.
+    if (!knownProviderKinds().includes(provider)) return { unavailable: true };
     if (!this.usageWindowsEnabled()) return { disabled: true };
     if (provider === "claude" && token) return this.deps.usageWindows!.claudeTokens?.refresh(token) ?? { unavailable: true };
     if (provider === "claude") return this.deps.usageWindows!.claude?.refresh() ?? { unavailable: true };
     if (provider === "codex") return this.deps.usageWindows!.windows.refresh();
+    // A rail the quota collector meters: one read of its file (shared with any other rail refreshing at once).
+    const collector = this.deps.usageWindows!.collector;
+    if (collector?.handles(provider)) return collector.refresh(provider);
+    // BR-1: a registered rail this daemon has no reader for answers unavailable, never another rail's windows.
     return { unavailable: true };
   }
 

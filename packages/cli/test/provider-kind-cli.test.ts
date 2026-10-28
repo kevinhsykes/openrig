@@ -1,11 +1,9 @@
-// P1 (fork/p1-provider-kind-open) — the CLI's --provider validation against the provider-kind
-// registry (no hard-coded pair). NOTE for runners: cli src imports @openrig/daemon/provider-types
-// (runtime), so this suite needs the daemon package built first (T2 gate step 1:
-// `npm run build -w packages/daemon`), like every other CLI suite that crosses that seam.
+// P1 (fork/p1-provider-kind-open), as changed by P4 — the CLI's --provider handling. The CLI keeps no list of known kinds: it passes the
+// kind to the daemon, which owns the live list (built-ins plus rails registered at load).
 import { describe, it, expect, vi } from "vitest";
 import { providerCommand } from "../src/commands/provider.js";
 import { DaemonClient } from "../src/client.js";
-import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
+import type { LifecycleDeps } from "../src/daemon-lifecycle.js";
 import type { StatusDeps } from "../src/commands/status.js";
 
 function mockLifecycleDeps(): LifecycleDeps {
@@ -22,32 +20,12 @@ function mockLifecycleDeps(): LifecycleDeps {
     isProcessAlive: vi.fn(() => true),
   };
 }
-function runningState(port: number): DaemonState {
-  return { pid: 123, port, db: "test.sqlite", startedAt: "2026-03-26T00:00:00Z" };
-}
-// The daemon answers as RUNNING, so the only path to clientFactory is a PASSED validation: if an
-// unknown kind ever got past it, the spy call fails the test before any HTTP leaves the process.
 function runningDeps(port: number, client: DaemonClient): StatusDeps {
   return {
     lifecycleDeps: mockLifecycleDeps(),
     clientFactory: vi.fn(() => client),
   };
 }
-// Deps whose daemon status reads as running and whose clientFactory fails the test if reached:
-// a rejected --provider must be refused BEFORE any daemon contact.
-function strictDeps(port: number): StatusDeps {
-  return {
-    lifecycleDeps: {
-      ...mockLifecycleDeps(),
-      exists: vi.fn((p: string) => p === STATE_FILE),
-      readFile: vi.fn((p: string) => (p === STATE_FILE ? JSON.stringify(runningState(port)) : null)),
-    },
-    clientFactory: vi.fn(() => {
-      throw new Error("clientFactory must not be reached for an unknown --provider");
-    }),
-  };
-}
-
 async function run(args: string[], deps: StatusDeps): Promise<{ logs: string[]; exitCode: number | undefined }> {
   const logs: string[] = [];
   const origLog = console.log, origErr = console.error, origExit = process.exitCode;
@@ -65,25 +43,46 @@ async function run(args: string[], deps: StatusDeps): Promise<{ logs: string[]; 
   return { logs, exitCode };
 }
 
-describe("rig provider --provider validates against the provider-kind registry", () => {
-  it("status --provider <unknown> is refused before any daemon contact, naming the known list", async () => {
-    const deps = strictDeps(59901);
-    const { logs, exitCode } = await run(["status", "--provider", "zai"], deps);
+describe("rig provider --provider is passed to the daemon, which owns the list of known kinds", () => {
+  // P4 (amendment F3): the CLI runs in its own process and can't see the rails a daemon registered at load, so it keeps no list of its own.
+  // It forwards --provider exactly as given and prints the daemon's refusal, which names the daemon's live known list.
+  const FOUR_BLOCK = { accounts: [], bindings: [], signals: [], asOf: "2026-08-03T12:00:00.000Z" };
+
+  it("status --refresh --provider <kind> forwards the kind exactly as given, and prints the daemon's refusal naming its live list", async () => {
+    const refusal = { status: 400, data: { error: "usage windows can be refreshed for codex, claude, zai (got nope)" } };
+    const client = { post: vi.fn(async () => refusal), get: vi.fn(async () => ({ status: 200, data: FOUR_BLOCK })) } as unknown as DaemonClient;
+    const deps = runningDeps(59901, client);
+    const { logs, exitCode } = await run(["status", "--refresh", "--provider", "nope"], deps);
+    expect((client.post as ReturnType<typeof vi.fn>).mock.calls[0]).toEqual(["/api/provider/usage/refresh", { provider: "nope" }, { timeoutMs: 60_000 }]);
+    expect(logs.join(" ")).toContain("codex, claude, zai");
     expect(exitCode).toBe(1);
-    expect(logs.join(" ")).toMatch(/--provider must be a known provider kind/);
-    expect(logs.join(" ")).toContain("codex, claude");
-    expect(logs.join(" ")).toContain("got zai");
-    expect(deps.clientFactory).not.toHaveBeenCalled();
+    expect(deps.clientFactory).toHaveBeenCalledTimes(1);
   });
 
-  it("the registry is case-sensitive: --provider Claude is refused like any unknown kind", async () => {
-    const { logs, exitCode } = await run(["status", "--provider", "Claude"], strictDeps(59902));
-    expect(exitCode).toBe(1);
-    expect(logs.join(" ")).toMatch(/--provider must be a known provider kind/);
+  it("a rail the daemon registered is accepted with no list on this side, and the kind is case-sensitive only at the daemon", async () => {
+    const ok = { status: 200, data: { refresh: { at: "2026-08-03T12:00:00.000Z", outcome: "ok", coalesced: false } } };
+    const client = { post: vi.fn(async () => ok), get: vi.fn(async () => ({ status: 200, data: FOUR_BLOCK })) } as unknown as DaemonClient;
+    const { exitCode } = await run(["status", "--refresh", "--provider", "zai", "--json"], runningDeps(59902, client));
+    expect(exitCode).toBeUndefined();
+    expect((client.post as ReturnType<typeof vi.fn>).mock.calls[0]?.[1]).toEqual({ provider: "zai" });
+    await run(["status", "--refresh", "--provider", "Claude", "--json"], runningDeps(59904, client));
+    expect((client.post as ReturnType<typeof vi.fn>).mock.calls[1]?.[1]).toEqual({ provider: "Claude" });
   });
 
-  it("a known kind passes validation and the status read proceeds", async () => {
-    const FOUR_BLOCK = { accounts: [], bindings: [], signals: [], asOf: "2026-08-03T12:00:00.000Z" };
+  it("the block filters pass --provider to the daemon too", async () => {
+    const client = { get: vi.fn(async () => ({ status: 200, data: { accounts: [] } })) } as unknown as DaemonClient;
+    await run(["accounts", "--provider", "zai", "--json"], runningDeps(59905, client));
+    expect((client.get as ReturnType<typeof vi.fn>).mock.calls[0]?.[0]).toBe("/api/provider/accounts?provider=zai");
+  });
+
+  it("the default refresh fan-out stays codex and claude", async () => {
+    const ok = { status: 200, data: { refresh: { at: "2026-08-03T12:00:00.000Z", outcome: "ok", coalesced: false } } };
+    const client = { post: vi.fn(async () => ok), get: vi.fn(async () => ({ status: 200, data: FOUR_BLOCK })) } as unknown as DaemonClient;
+    await run(["status", "--refresh", "--json"], runningDeps(59906, client));
+    expect((client.post as ReturnType<typeof vi.fn>).mock.calls.map((c) => (c[1] as { provider: string }).provider)).toEqual(["codex", "claude"]);
+  });
+
+  it("a built-in kind and the status read proceed as before", async () => {
     const client = { get: vi.fn(async () => ({ status: 200, data: FOUR_BLOCK })) } as unknown as DaemonClient;
     const deps = runningDeps(59903, client);
     const { logs, exitCode } = await run(["status", "--provider", "claude", "--json"], deps);
