@@ -1111,6 +1111,10 @@ export class SeatLifecycleService {
         // and staged typing turns ((c)/(d)) are in-memory inside DeliveryGuard and are NOT claimed.
         // UNKNOWN (schema-absent column, R2.3a) refuses too — an unobservable surface may not be
         // reported as a drained one.
+        // BOUNDED LIMIT (P20b F4): the drain is checked ONCE here, before the kill, and is not re-checked in the
+        // final transaction. Work claimed by this generation between this check and the kill is not seen. The
+        // lease does not close that gap (a queue claim does not take it). The settle is a pre-kill gate, not a
+        // guarantee that nothing was claimed during the kill's await.
         const settleGeneration = expected.occupantGeneration ?? liveGeneration();
         const drain = this.generationDrainSnapshot(settleGeneration);
         if (!drain.settled) {

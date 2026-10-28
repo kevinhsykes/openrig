@@ -748,7 +748,7 @@ identity remains unverified; a version number alone cannot clear it.
   // as NOT generation-enforced and surfaced; the stop itself is real and is reported as such).
   const stopWithExpectedGeneration = async (
     seat: string,
-    opts: { reason: string; operator?: string; expectGeneration: string; json?: boolean },
+    opts: { reason: string; operator?: string; expectGeneration: string; expectSession?: string; json?: boolean },
   ): Promise<void> => {
     const generation = opts.expectGeneration.trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(generation)) {
@@ -774,6 +774,14 @@ identity remains unverified; a version number alone cannot clear it.
       process.exitCode = 2;
       return;
     }
+    if (seen.status === 404 && typeof (seen.data as { code?: unknown } | undefined)?.code !== "string") {
+      // A daemon that has the route answers a missing seat with a coded body; a bare 404 means the route is absent.
+      const message = `This daemon has no stop-precondition route (HTTP 404), so it cannot enforce --expect-generation ${generation}. Nothing was sent.`;
+      if (opts.json) console.error(JSON.stringify({ error: "expect_generation_unsupported", message }));
+      else console.error(message);
+      process.exitCode = 1;
+      return;
+    }
     if (seen.status >= 400) {
       const data = seen.data as unknown as SeatStatusError;
       if (opts.json) console.log(JSON.stringify(data, null, 2));
@@ -789,10 +797,26 @@ identity remains unverified; a version number alone cannot clear it.
       process.exitCode = 1;
       return;
     }
+    // The pair (R6h §1.3a) is caller-bound when --expect-session is given: that id is sent as-is and never
+    // replaced from the preflight. Without it the sessionId comes from the preflight just read, which binds the
+    // generation to the launch seen a moment ago, not to one the caller reviewed; the output says so.
+    const sessionFromPreflight = opts.expectSession === undefined;
+    const sessionId = sessionFromPreflight ? (tuple["sessionId"] ?? null) : opts.expectSession!.trim();
+    if (!sessionFromPreflight && sessionId === "") {
+      const message = "--expect-session needs the session id (got an empty value). Nothing was sent.";
+      if (opts.json) console.error(JSON.stringify({ error: "expect_session_invalid", message }));
+      else console.error(message);
+      process.exitCode = 1;
+      return;
+    }
+    if (sessionFromPreflight) {
+      const note = `sessionId ${JSON.stringify(sessionId)} was taken from the preflight (no --expect-session): the generation is caller-bound, the session is not.`;
+      console.error(`Note: ${note}`);
+    }
     const res = await client.post<Record<string, unknown>>(`/api/seat/stop/${encodeURIComponent(seat)}`, {
       reason: opts.reason,
       operator: opts.operator,
-      expected: { nodeId: tuple["nodeId"], sessionId: tuple["sessionId"] ?? null, occupantGeneration: generation },
+      expected: { nodeId: tuple["nodeId"], sessionId, occupantGeneration: generation },
     });
     if (opts.json) console.log(JSON.stringify(res.data, null, 2));
     if (res.status >= 400) {
@@ -1349,6 +1373,7 @@ Examples:
     .argument("<seat>", "Canonical session name or logical seat ref")
     .requiredOption("--reason <text>", "Audit reason recorded on the session.stopped event")
     .option("--operator <address>", "Operator recorded on the audit event")
+    .option("--expect-session <id>", "With --expect-generation: the reviewed session id (the R6h §1.3a pair). Sent as given and never filled from the preflight; without it the preflight's sessionId is used and the output says so")
     .option("--expect-generation <uuid>", "Refuse unless the seat's live occupant generation is still <uuid> when the stop takes effect (the pair with the reviewed sessionId, R6h §1.3a). A read-only preflight first: a daemon that does not advertise generation keying is reported with expect_generation_unsupported and nothing is sent; an ok answer that does not echo enforcedOccupantGeneration is treated as NOT generation-enforced (§5.3c)")
     .option("--json", "JSON output for agents")
     .description("Stop exactly one LIVE managed seat (kills only that seat's tmux session; audited)")
@@ -1363,10 +1388,15 @@ Running counts still exclude the stopped seat; stopping every seat leaves the
 rig stopped. Examples:
   rig seat stop dev-impl@my-rig --reason "wave boundary retirement"
   rig seat stop dev.impl --reason "stuck occupant" --json`)
-    .action(async (seat: string, opts: { reason: string; operator?: string; expectGeneration?: string; json?: boolean }) => {
+    .action(async (seat: string, opts: { reason: string; operator?: string; expectGeneration?: string; expectSession?: string; json?: boolean }) => {
+      if (opts.expectSession !== undefined && opts.expectGeneration === undefined) {
+        console.error("--expect-session needs --expect-generation (the pair). Nothing was sent.");
+        process.exitCode = 1;
+        return;
+      }
       if (opts.expectGeneration !== undefined) {
         await stopWithExpectedGeneration(seat, {
-          reason: opts.reason, operator: opts.operator, expectGeneration: opts.expectGeneration, json: opts.json,
+          reason: opts.reason, operator: opts.operator, expectGeneration: opts.expectGeneration, expectSession: opts.expectSession, json: opts.json,
         });
         return;
       }

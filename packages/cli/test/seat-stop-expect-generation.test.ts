@@ -27,7 +27,7 @@ let errors: string[];
 let gets: string[];
 let posts: Array<{ path: string; body: Record<string, unknown> }>;
 
-function cli(preconditionAnswer: { status: number; data: unknown }, stopAnswer: { status: number; data: unknown }) {
+function cli(preconditionAnswer: { status: number; data: unknown }, stopAnswer: { status: number; data: unknown }, extra: string[] = []) {
   const deps = {
     lifecycleDeps: {} as SeatDeps["lifecycleDeps"],
     clientFactory: () => ({
@@ -36,7 +36,7 @@ function cli(preconditionAnswer: { status: number; data: unknown }, stopAnswer: 
     }),
   } as unknown as SeatDeps;
   const program = new Command().exitOverride().addCommand(seatCommand(deps));
-  return program.parseAsync(["node", "rig", "seat", "stop", SEAT, "--reason", "p20", "--expect-generation", "99999999-8888-4777-8666-555555555555", "--json"]);
+  return program.parseAsync(["node", "rig", "seat", "stop", SEAT, "--reason", "p20", "--expect-generation", "99999999-8888-4777-8666-555555555555", ...extra, "--json"]);
 }
 
 describe("rig seat stop --expect-generation (§5.3c capability echo)", () => {
@@ -53,7 +53,41 @@ describe("rig seat stop --expect-generation (§5.3c capability echo)", () => {
     expect(gets).toEqual([`/api/seat/stop-precondition/${encodeURIComponent(SEAT)}`]);
     expect(posts[0]!.body.expected).toEqual({ nodeId: "node-1", sessionId: "session-1", occupantGeneration: "99999999-8888-4777-8666-555555555555" });
     expect(process.exitCode).toBeUndefined();
-    expect(errors.join("\n")).toBe("");
+    expect(errors.join("\n")).toContain("taken from the preflight"); // no --expect-session: said in the output
+  });
+
+  const OK = { status: 200, data: { ok: true, sessionName: SEAT, enforcedOccupantGeneration: "x", seat: { logicalId: "dev-a", rigName: "rig" } } };
+
+  it("--expect-session is sent as given and never replaced by the preflight's sessionId (continuation relaunch case)", async () => {
+    // The preflight now reports a RELAUNCHED session (same generation, new id). The reviewed id wins, so the
+    // daemon sees the mismatch and answers selection_changed instead of stopping the new launch.
+    const relaunched = { ...TUPLE, expected: { ...TUPLE.expected, sessionId: "session-2" } };
+    await cli({ status: 200, data: relaunched }, OK, ["--expect-session", "session-1"]);
+    expect(posts[0]!.body.expected).toEqual({ nodeId: "node-1", sessionId: "session-1", occupantGeneration: "99999999-8888-4777-8666-555555555555" });
+    expect(errors.join("\n")).not.toContain("taken from the preflight");
+  });
+
+  it("--expect-session without --expect-generation is refused before anything is sent", async () => {
+    const deps = { lifecycleDeps: {} as SeatDeps["lifecycleDeps"], clientFactory: () => ({ get: vi.fn(), post: vi.fn() }) } as unknown as SeatDeps;
+    const program = new Command().exitOverride().addCommand(seatCommand(deps));
+    await program.parseAsync(["node", "rig", "seat", "stop", SEAT, "--reason", "p20", "--expect-session", "session-1", "--json"]);
+    expect(gets).toEqual([]);
+    expect(errors.join("\n")).toContain("Nothing was sent");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("a bare 404 preflight (route absent) is expect_generation_unsupported by name and sends nothing", async () => {
+    await cli({ status: 404, data: "404 Not Found" }, OK);
+    expect(posts).toEqual([]);
+    expect(errors.join("\n")).toContain("expect_generation_unsupported");
+    expect(process.exitCode).toBe(1);
+  });
+
+  it("a coded 404 (unknown seat on a daemon that has the route) is passed through, not called unsupported", async () => {
+    await cli({ status: 404, data: { ok: false, code: "seat_not_found", message: "no such seat" } }, OK);
+    expect(posts).toEqual([]);
+    expect(errors.join("\n")).not.toContain("expect_generation_unsupported");
+    expect(process.exitCode).toBe(1);
   });
 
   it("an older daemon (no occupantGeneration key in the tuple) gets nothing sent", async () => {
