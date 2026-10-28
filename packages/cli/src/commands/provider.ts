@@ -216,6 +216,11 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     ].filter((x) => x !== null).join(" · ");
   }
 
+  /** The short label for an allowance group of collector rows: the rail, the window and the file's own source. */
+  function collectorHeaderLabel(id: Record<string, unknown>): string {
+    return `rail ${id["rail"]}${id["provider"] !== id["rail"] ? ` (file key ${id["provider"]})` : ""} · window ${id["window"]} · source ${id["source"]}`;
+  }
+
   /** What the last read of the quota-collector file saw: what it served and what it set aside, counted and named. */
   function renderQuotaCollector(q: Record<string, unknown>): void {
     const rails = (q["rails"] as string[] | undefined) ?? [];
@@ -352,7 +357,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
         : g["linkage"] === "conflict" ? `the same allowance on ${hosts.length} hosts, disagreeing: ${hosts.join(", ")}`
           : g["linkage"] === "single" ? `observed on ${hosts[0]}`
             : `linkage unknown; observed on ${hosts.join(", ")}`;
-      const identity = id ? `${identityLabel(id)} · bucket ${id["limitId"]}` : "not read yet";
+      const identity = id ? ((first["source"] as Record<string, unknown> | undefined)?.["kind"] === "quota_collector_file" ? collectorHeaderLabel(id) : `${identityLabel(id)} · bucket ${id["limitId"]}`) : "not read yet";
       console.log(`  ${g["provider"]}  ${identity}  [${linkage}]`);
       for (const note of (g["notes"] as string[] | undefined) ?? []) console.log(`    ! ${note}`);
       for (const o of obs) {
