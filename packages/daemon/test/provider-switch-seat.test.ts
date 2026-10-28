@@ -53,6 +53,17 @@ function harness(opts: { plan?: Record<string, unknown>; run?: Record<string, un
 }
 
 describe("rig provider switch --seat moves one seat to a login saved in the Codex home it runs on", () => {
+  it("refuses Claude config-dir targets on Codex before any account or restart action", async () => {
+    for (const forceUnsafe of [false, true]) {
+      const h = harness();
+      const input = { seat: "dev-a@rig", toAccount: "work", configDir: "/tmp/work", forceUnsafe };
+      expect(await h.svc.precheck(input, h.seatRestart)).toMatchObject({ safe: false, reasons: ["rebind_unsupported_for_runtime"] });
+      expect(await h.svc.switchAccount(input, h.seatRestart)).toMatchObject({ outcome: "failed_safely", reasons: ["rebind_unsupported_for_runtime"] });
+      expect(h.calls).toEqual([]);
+      expect(h.homes.get(HOME)!.active).toBe("personal");
+    }
+  });
+
   it("plans the restart, keeps the outgoing login, activates the chosen one there, restarts in place, and leaves uptake to verify", async () => {
     const h = harness();
     const r = await h.svc.switchAccount({ seat: "dev-a@rig", toAccount: "work", forceUnsafe: false }, h.seatRestart);

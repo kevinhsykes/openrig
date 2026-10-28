@@ -219,7 +219,11 @@ describe("GET /api/provider/usage/hosts", () => {
     };
     const rewrite = (usage: unknown[]) => (route: string, body: unknown) =>
       route === "/api/provider/status" ? { ...(body as object), usage } : body;
-    const a = await host("collector-a", { rewrite: rewrite([row]) });
+    const unavailable: ProviderUsageAllowance = {
+      ...row, provider: "qwen", identity: null, windows: [], currentAvailability: "unknown",
+      unavailableReason: "no windows in file",
+    };
+    const a = await host("collector-a", { rewrite: rewrite([row, unavailable]) });
     const b = await host("collector-b", { rewrite: rewrite([row]) });
     const bad = await host("collector-bad", { rewrite: rewrite([{ ...row, identity: { ...row.identity, rail: "another-rail" } }]) });
     const hub = await host("hub", { registry: [a.entry(), b.entry(), bad.entry()] });
@@ -230,6 +234,8 @@ describe("GET /api/provider/usage/hosts", () => {
     expect(groups.map((g) => g.observations[0]!.hostId)).toEqual(["collector-a", "collector-b"]);
     expect(groups.every((g) => g.linkage === "unknown" && g.observations.length === 1)).toBe(true);
     expect(body.hosts.find((h) => h.hostId === "collector-bad")?.usage).toBe("unavailable");
+    expect(body.items.flatMap((g) => g.observations).find((o) => o.row.provider === "qwen")?.row)
+      .toMatchObject({ identity: null, currentAvailability: "unknown", unavailableReason: "no windows in file" });
     expect(isUsageRow({ ...row, source: { kind: "codex_app_server", host: "local" } })).toBe(false);
     expect(isUsageRow({ ...row, identity: null })).toBe(false);
   });

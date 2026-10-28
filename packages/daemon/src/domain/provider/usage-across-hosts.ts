@@ -357,8 +357,12 @@ export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
       recordState: nullable(str), unknown: nullable(record({ kind: str, reason: nullable(str) })),
     });
     return nonempty(v["provider"]) && v["source"]["host"] === "local"
-      && isRecord(identity) && identity["rail"] === v["provider"]
-      && collectorIdentity(identity) && anyIdentityKeys(identity) && record(usageRowFields)(v);
+      && record(usageRowFields)(v)
+      && (identity === null
+        ? v["currentAvailability"] === "unknown" && Array.isArray(v["windows"]) && v["windows"].length === 0
+          && nonempty(v["unavailableReason"])
+        : isRecord(identity) && identity["rail"] === v["provider"]
+          && collectorIdentity(identity) && anyIdentityKeys(identity));
   }
   if (v["provider"] !== "codex" && v["provider"] !== "claude") return false;
   const identity = v["provider"] === "codex" ? codexIdentity : claudeIdentity;
