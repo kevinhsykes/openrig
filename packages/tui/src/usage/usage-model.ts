@@ -44,6 +44,29 @@ export function identityLabel(id: Row): string {
         : "identity unresolved";
 }
 
+/** A quota-collector rail row (zai, ...): a window of one rail as the fleet's quota collector file reported it. It names no account. */
+export function isCollectorRow(r: Row): boolean {
+  return (r["source"] as Row | undefined)?.["kind"] === "quota_collector_file";
+}
+
+/** A collector row's identity: the rail, who really wrote the window (verbatim), and that it names no account.
+ *  The same words as `rig provider status` draws for the row. */
+export function collectorLabel(id: Row): string {
+  const unknown = id["unknown"] as Row | null | undefined;
+  return [
+    `rail ${str(id["rail"])}${id["provider"] !== id["rail"] ? ` (file key ${str(id["provider"])})` : ""}`,
+    `source ${str(id["source"])} (the file's own string), read from the fleet quota collector file`,
+    "advisory only: proves rail-level use, not which account spent it",
+    id["recordState"] && id["recordState"] !== "AVAILABLE" ? `file state ${str(id["recordState"])}` : null,
+    unknown ? `unknown (${str(unknown["kind"])}${unknown["reason"] ? `: ${str(unknown["reason"])}` : ""})` : null,
+  ].filter((x) => x !== null).join(" · ");
+}
+
+/** The short label for an allowance group of collector rows: the rail, the window and the file's own source. */
+export function collectorHeaderLabel(id: Row): string {
+  return `rail ${str(id["rail"])}${id["provider"] !== id["rail"] ? ` (file key ${str(id["provider"])})` : ""} · window ${str(id["window"])} · source ${str(id["source"])}`;
+}
+
 /** One served allowance row, as served (also drawn per host by System → Usage across hosts). */
 /** The row's sign-in fact, as served; null when an older daemon doesn't serve it. */
 export function signInText(r: Row): string | null {
@@ -77,8 +100,9 @@ export function allowanceLines(r: Row): ContentLine[] {
     if (signIn) lines.push({ text: `    ${signIn}` });
     return lines;
   }
-  const labels = [identityLabel(id), `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${str(r["seats"])}`]
-    .filter((x) => x !== null && x !== undefined);
+  const labels = isCollectorRow(r) ? [collectorLabel(id)]
+    : [identityLabel(id), `bucket ${str(id["limitId"])}`, id["email"] ?? "email not reported", id["planType"], id["subscriptionType"], `seats ${str(r["seats"])}`]
+      .filter((x) => x !== null && x !== undefined);
   const earlier = r["latestFromSource"] ? ""
     : r["retained"] === "before_restart" ? "  [kept from before the daemon restarted; not a current reading]"
     : id["source"] === "unresolved" ? "  [from an earlier read; possibly this same login]"

@@ -430,3 +430,27 @@ describe("the bounds chain: every wait outlasts what it waits for", () => {
     expect(USAGE_HOSTS_VIEW_DEADLINE_MS).toBeLessThan(USAGE_HOSTS_VIEW_WAIT_MS);
   });
 });
+
+describe("rig provider status --all-hosts: a quota-collector rail row", () => {
+  const zaiRow = (r: Record<string, unknown>) => ({
+    ...r, provider: "zai", observedAt: NOW,
+    identity: { provider: "zai", rail: "zai", window: "5h", source: "z.ai-live", recordState: "AVAILABLE", unknown: null },
+    source: { kind: "quota_collector_file", host: "local" },
+  });
+
+  it("the allowance header names rail, window and source; no native-provider words; the native entry is unchanged", async () => {
+    const rail = await host("rail", { rewrite: (p, body) => p === "/api/provider/status"
+      ? { ...(body as object), usage: [...(body as { usage: Array<Record<string, unknown>> }).usage, zaiRow((body as { usage: Array<Record<string, unknown>> }).usage[0]!)] } : body });
+    await refreshDirect(rail);
+    const hub = await host("hub", { registry: [rail.entry()] });
+    const { out, exitCode } = await run(["status", "--all-hosts"], hub);
+    expect(exitCode).toBeUndefined();
+    const header = out.split("\n").find((l) => l.startsWith("  zai  "))!;
+    expect(header).toBeDefined();
+    expect(header).toContain("rail zai");
+    expect(header).toContain("window 5h");
+    expect(header).toContain("source z.ai-live");
+    for (const bad of ["identity unresolved", "bucket", "undefined"]) expect(header).not.toContain(bad);
+    expect(out.split("\n").find((l) => l.startsWith("  codex  "))).toContain("bucket");
+  });
+});

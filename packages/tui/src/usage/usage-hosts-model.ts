@@ -1,6 +1,6 @@
 import { sectionRule, wrapDetailLines, type ContentLine } from "../detail.js";
 import type { FleetSnapshot } from "../types.js";
-import { allowanceLines, failureText, identityLabel, seatLines, str, type Row } from "./usage-model.js";
+import { allowanceLines, collectorHeaderLabel, failureText, identityLabel, isCollectorRow, seatLines, str, type Row } from "./usage-model.js";
 
 // Slice 01 — System → Usage across hosts: usage windows on the registered hosts, as this daemon reads them
 // (GET /api/provider/usage/hosts, the same body `rig provider status --all-hosts --json` prints). Each host's rows are
@@ -33,12 +33,13 @@ function hostLines(h: Row): ContentLine[] {
 function groupLines(g: Row): ContentLine[] {
   const observations = (g["observations"] as Row[] | undefined) ?? [];
   const hosts = [...new Set(observations.map((o) => str(o["hostId"])))];
-  const id = (observations[0]?.["row"] as Row | undefined)?.["identity"] as Row | null | undefined;
+  const firstRow = observations[0]?.["row"] as Row | undefined;
+  const id = firstRow?.["identity"] as Row | null | undefined;
   const linkage = g["linkage"] === "same" ? `the same allowance on ${hosts.length} hosts: ${hosts.join(", ")}`
     : g["linkage"] === "conflict" ? `the same allowance on ${hosts.length} hosts, disagreeing: ${hosts.join(", ")}`
       : g["linkage"] === "single" ? `observed on ${hosts[0] ?? "unknown"}`
         : `linkage unknown; observed on ${hosts.join(", ")}`;
-  const lines: ContentLine[] = [{ text: `  ${str(g["provider"])}  ${id ? `${identityLabel(id)} · bucket ${str(id["limitId"])}` : "not read yet"}  [${linkage}]` }];
+  const lines: ContentLine[] = [{ text: `  ${str(g["provider"])}  ${id ? (firstRow && isCollectorRow(firstRow) ? collectorHeaderLabel(id) : `${identityLabel(id)} · bucket ${str(id["limitId"])}`) : "not read yet"}  [${linkage}]` }];
   for (const note of (g["notes"] as string[] | undefined) ?? []) lines.push({ text: `    ! ${note}` });
   for (const o of observations) {
     lines.push({ text: `    on ${str(o["hostId"])} (read ${str(o["readAt"])}):` });
