@@ -45,6 +45,9 @@ function fixture(env: { rig?: Record<string, string>; member?: Record<string, st
     tokenRef: () => null,
     setTokenRef: () => {},
     ...claudeSeatConfigDirHooks(rigRepo),
+    // This file is about the ROLLBACK after a refused relaunch. The conversation gate (T3 652bdcf7f, P28) would refuse these
+    // synthetic dirs before the relaunch is reached; it has its own tests (claude-seat-config-dir-hooks, provider-switch-claude-config-dir).
+    canResumeInConfigDir: () => true,
     snapshot: () => ({ snapshotId: "snap-1", resumes: true as const, conversation: "conv-1" }),
     exclusive: (_nodeId, fn) => fn(),
     // The relaunch refuses before touching the process.
@@ -90,7 +93,7 @@ describe("a refused relaunch restores the member's own CLAUDE_CONFIG_DIR, not th
     let during: string | null = "unset";
     const hooks = claudeSeatConfigDirHooks(rigRepo);
     const spy: ClaudeSeatRelaunch = { seat: () => ({ nodeId: f.node.id, rigId: f.rig.id, rigName: "rig", logicalId: "dev-a", running: true, pane: "%1" }),
-      tokenRef: () => null, setTokenRef: () => {}, ...hooks,
+      tokenRef: () => null, setTokenRef: () => {}, ...hooks, canResumeInConfigDir: () => true,   // the gate has its own tests
       snapshot: () => ({ snapshotId: "s", resumes: true as const, conversation: null }), exclusive: (_n, fn) => fn(),
       relaunchInPane: async () => { during = memberEnv(f.node.id); return { ok: false, effect: "none", code: "x", message: "m" }; } };
     const svc = new ProviderServiceImpl({ db: {} as never, listRigs: () => [], claudePrecedence: async () => CLEAR,
