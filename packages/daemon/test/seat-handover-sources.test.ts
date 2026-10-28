@@ -615,6 +615,85 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
       expect(typedIntoShell()).toEqual([]);
     });
 
+    // P14c: after the launch was typed and the agent did not come up, our own launch is interrupted in the seat's pane
+    // (never a kill of the pane or session), and the outcome is named. `cc` counts the Ctrl-C keys that reached the pane.
+    describe("a launch that did not come up is interrupted in the seat's own pane", () => {
+      let cc: number;
+      /** A launch that starts late: the shell is read for the whole wait, then the agent appears and stays until `needs` Ctrl-C. */
+      function lateAgent(needs: number | null) {
+        cc = 0;
+        let enteredAt: number | null = null;
+        sendKeys.mockImplementation(async (_s: string, keys: string[]) => {
+          log.push(`keys:${keys.join("+")}`);
+          if (keys.includes("C-c")) cc += 1;
+          return { ok: true };
+        });
+        getPaneCommand.mockImplementation(async () => {
+          const sent = log.includes("launch");
+          if (!sent) return "zsh";
+          enteredAt = (enteredAt ?? polls);
+          polls += 1;
+          const waitOver = polls - enteredAt > 60;
+          const up = waitOver && (needs === null || cc < needs);
+          return up ? "node" : "zsh";
+        });
+      }
+
+      it.each([1, 2])("an agent that appears late and needs %i Ctrl-C is interrupted until the pane is at the shell, and the outcome is named", async (needs) => {
+        seedTerminalSeat();
+        lateAgent(needs);
+        const err = failed(await handover("rebuild"));
+        expect(err.message).toContain("agent_not_up");
+        expect(cc).toBe(needs);
+        expect(err.message).toMatch(/interrupted/i);
+        expect(err.message).toContain("%9");
+        expect(typedIntoShell()).toEqual([]);
+        expect(killSession).not.toHaveBeenCalled();
+      });
+
+      it("an agent that survives every Ctrl-C is named with the pane id and what it is running, and still nothing is killed", async () => {
+        const { node } = seedTerminalSeat();
+        lateAgent(null);
+        const err = failed(await handover("rebuild"));
+        expect(cc).toBeGreaterThanOrEqual(2);
+        expect(cc).toBeLessThanOrEqual(5);
+        expect(err.message).toContain("agent_not_up");
+        expect(err.message).toContain("%9");
+        expect(err.message).toContain("node");
+        expect(err.message).toMatch(/could not|still running|check/i);
+        expect(err.guidance).toContain("%9");
+        expect(killSession).not.toHaveBeenCalled();
+        expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%0");
+      });
+
+      it("a launch whose Enter failed is interrupted too, so the typed command does not stay on the line", async () => {
+        seedTerminalSeat();
+        cc = 0;
+        sendKeys.mockImplementation(async (_s: string, keys: string[]) => {
+          if (keys.includes("C-c")) { cc += 1; return { ok: true }; }
+          return keys.includes("Enter") && log.includes("launch") ? { ok: false, error: "induced" } : { ok: true };
+        });
+        getPaneCommand.mockImplementation(async () => "zsh");
+        const err = failed(await handover("rebuild"));
+        expect(err.message).toContain("launch_action_failed");
+        expect(cc).toBeGreaterThanOrEqual(1);
+      });
+
+      it("nothing was typed, nothing is interrupted: no launch action, a launch that cannot be typed, and a healthy start send no Ctrl-C", async () => {
+        seedTerminalSeat([]);
+        lateAgent(1);
+        failed(await handover("rebuild"));
+        expect(cc).toBe(0);
+        db.prepare("DELETE FROM sessions").run(); db.prepare("DELETE FROM nodes").run(); db.prepare("DELETE FROM rigs").run();
+        log = [];
+        seedTerminalSeat();
+        sendText.mockImplementation(async () => ({ ok: false, error: "induced: tmux down" }));
+        failed(await handover("rebuild"));
+        expect(cc).toBe(0);
+        expect(log.filter((e) => e === "keys:C-c")).toEqual([]);
+      });
+    });
+
     it("other runtimes are untouched: a codex seat gets its packet at once, with no launch action and no pane polling for an agent", async () => {
       seedSeat();
       sendText.mockImplementation(async (_s: string, text: string) => { log.push(text.startsWith("# Seat rebuild handover") ? "packet" : "other"); return { ok: true }; });

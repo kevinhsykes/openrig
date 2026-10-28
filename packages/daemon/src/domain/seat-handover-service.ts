@@ -35,6 +35,8 @@ import { inspectStartupStagedText, startupNoInputLine, startupOwnCollapsedPaste,
 
 /** P14: how often a terminal successor's pane is read for its foreground command, and how long before giving up. */
 const TERMINAL_AGENT_POLL_MS = 500;
+const TERMINAL_LAUNCH_INTERRUPT_ATTEMPTS = 4;
+const TERMINAL_LAUNCH_INTERRUPT_SETTLE_MS = 300;
 const TERMINAL_AGENT_READY_TIMEOUT_MS = 30_000;
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
@@ -985,11 +987,40 @@ export class SeatHandoverService {
     const up = await this.awaitTerminalAgent(node.id, launch.tmuxSession, launch.tmuxPane);
     if (up.ok) return null;
     await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+    // P14c: when our own launch was typed, it is interrupted in the seat's pane (never a kill of the pane or session: the
+    // successor occupies the seat's preserved pane) and the outcome is named, so a late agent is not left unadopted unseen.
+    const interrupt = up.launchTyped ? await this.interruptOwnLaunch(launch.tmuxSession, launch.tmuxPane) : null;
     return {
       ok: false,
       code: "context_delivery_failed",
-      message: `Handover failed at step "await-terminal-agent": [${up.reason}] ${up.message}`,
-      guidance: "The successor candidate was unwound and the seat's binding is unchanged; no context packet was typed into the pane. The seat is re-wakeable. Fix the cause named in the brackets, then retry.",
+      message: `Handover failed at step "await-terminal-agent": [${up.reason}] ${up.message}${interrupt ? ` ${interrupt.message}` : ""}`,
+      guidance: `The successor candidate was unwound and the seat's binding is unchanged; no context packet was typed into the pane. ${interrupt ? `${interrupt.guidance} ` : ""}The seat is re-wakeable. Fix the cause named in the brackets, then retry.`,
+    };
+  }
+
+  /**
+   * P14c: Ctrl-C the launch this handover typed, in the seat's own pane, until the foreground is the shell again. Bounded;
+   * some agent CLIs need two. It never kills the pane or session, and it runs only after the launch was typed, so the
+   * foreground is our own launch (the launcher verified a blank shell before it). A failure is named with the pane id and
+   * what is still running.
+   */
+  private async interruptOwnLaunch(session: string, pane: string): Promise<{ message: string; guidance: string }> {
+    const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+    let foreground: string | null = null;
+    for (let attempt = 1; attempt <= TERMINAL_LAUNCH_INTERRUPT_ATTEMPTS; attempt++) {
+      await this.tmuxAdapter.sendKeys(session, ["C-c"]);
+      await this.sleep(TERMINAL_LAUNCH_INTERRUPT_SETTLE_MS);
+      foreground = await this.tmuxAdapter.getPaneCommand(pane);
+      if (foreground && isShellForeground(foreground, shell)) {
+        return {
+          message: `The launch this handover typed was interrupted in pane ${pane}, which is back at the shell (${attempt} Ctrl-C).`,
+          guidance: `The launch was interrupted in pane ${pane}; the pane is at the shell and no agent was left running in it.`,
+        };
+      }
+    }
+    return {
+      message: `The launch this handover typed could not be interrupted: pane ${pane} is ${foreground ? `still running "${foreground}"` : "unreadable"} after ${TERMINAL_LAUNCH_INTERRUPT_ATTEMPTS} Ctrl-C. Nothing was killed.`,
+      guidance: `Check pane ${pane} of ${session}: ${foreground ? `"${foreground}" is still running in it` : "its foreground could not be read"}, and it may start an agent that no seat has adopted. Stop it by hand before retrying.`,
     };
   }
 
@@ -997,7 +1028,7 @@ export class SeatHandoverService {
     nodeId: string,
     session: string,
     pane: string,
-  ): Promise<{ ok: true } | { ok: false; reason: string; message: string }> {
+  ): Promise<{ ok: true } | { ok: false; reason: string; message: string; launchTyped?: boolean }> {
     const read = readTerminalLaunchActions(this.db, nodeId);
     if (!read.ok) return { ok: false, reason: read.reason, message: `${read.detail}. A terminal seat's agent is started by its persisted startup action, so the packet was not typed.` };
     if (read.actions.length === 0) {
@@ -1007,12 +1038,14 @@ export class SeatHandoverService {
         message: "the seat has no persisted after_ready launch command, so its successor would be a bare shell and the packet would be typed into bash. Nothing was typed.",
       };
     }
+    let typedAny = false;
     for (const action of read.actions) {
       const sent = await this.tmuxAdapter.sendText(session, action.value);
-      if (!sent.ok) return { ok: false, reason: "launch_action_failed", message: `the launch command could not be typed (${(sent as { message?: string; error?: string }).message ?? (sent as { error?: string }).error ?? "send_text failed"})` };
+      if (!sent.ok) return { ok: false, reason: "launch_action_failed", launchTyped: typedAny, message: `the launch command could not be typed (${(sent as { message?: string; error?: string }).message ?? (sent as { error?: string }).error ?? "send_text failed"})` };
+      typedAny = true;
       await this.sleep(200); // the same settle between text and Enter every packet delivery here uses
       const submitted = await this.tmuxAdapter.sendKeys(session, ["Enter"]);
-      if (!submitted.ok) return { ok: false, reason: "launch_action_failed", message: `the launch command could not be submitted (${(submitted as { message?: string; error?: string }).message ?? (submitted as { error?: string }).error ?? "Enter failed"})` };
+      if (!submitted.ok) return { ok: false, reason: "launch_action_failed", launchTyped: true, message: `the launch command could not be submitted (${(submitted as { message?: string; error?: string }).message ?? (submitted as { error?: string }).error ?? "Enter failed"})` };
     }
     // The agent is up when the pane's foreground is no longer the shell, seen on two polls in a row: one flash of a process
     // that then falls back to the shell is not readiness.
@@ -1033,6 +1066,7 @@ export class SeatHandoverService {
     return {
       ok: false,
       reason: "agent_not_up",
+      launchTyped: true,
       message: `the pane of ${session} ${last ? `was still running "${last}", the shell,` : "could not be read"} after the launch command was typed, so the agent did not come up within ${Math.round(this.terminalAgentReadyTimeoutMs / 1000)} s. The packet was not typed.`,
     };
   }
