@@ -1,0 +1,283 @@
+{
+  "accounts": [
+    {
+      "accountId": "work",
+      "label": "work",
+      "provider": "codex",
+      "authState": "unknown",
+      "profileRef": "work",
+      "asOf": "2026-10-27T12:00:00.000Z"
+    },
+    {
+      "accountId": "personal",
+      "label": "personal",
+      "provider": "codex",
+      "authState": "unknown",
+      "profileRef": "personal",
+      "asOf": "2026-10-27T12:00:00.000Z"
+    },
+    {
+      "accountId": "spare",
+      "label": "spare",
+      "provider": "codex",
+      "authState": "unknown",
+      "profileRef": "spare",
+      "asOf": "2026-10-27T12:00:00.000Z"
+    }
+  ],
+  "bindings": [
+    {
+      "accountId": "work",
+      "seatSession": "driver-a@rig-a",
+      "rigName": "rig-a",
+      "boundAt": "2026-10-26T10:00:00Z",
+      "bindingSource": "codex_auth_seat_registry",
+      "anomalies": [
+        {
+          "kind": "same_account_on_n_seats",
+          "count": 2,
+          "seats": [
+            "driver-a@rig-a",
+            "driver-b@rig-a"
+          ],
+          "evidence": "account work bound on 2 seats: driver-a@rig-a, driver-b@rig-a",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": "work",
+      "seatSession": "driver-b@rig-a",
+      "rigName": "rig-a",
+      "boundAt": "2026-10-26T11:00:00Z",
+      "bindingSource": "codex_auth_seat_registry",
+      "anomalies": [
+        {
+          "kind": "same_account_on_n_seats",
+          "count": 2,
+          "seats": [
+            "driver-a@rig-a",
+            "driver-b@rig-a"
+          ],
+          "evidence": "account work bound on 2 seats: driver-a@rig-a, driver-b@rig-a",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": null,
+      "seatSession": "pm@rig-a",
+      "rigName": "rig-a",
+      "boundAt": null,
+      "bindingSource": null,
+      "anomalies": [
+        {
+          "kind": "seat_with_no_account",
+          "seat": "pm@rig-a",
+          "evidence": "seat pm@rig-a in rig rig-a has no bound account",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": "personal",
+      "seatSession": "qa@rig-b",
+      "rigName": "rig-b",
+      "boundAt": "2026-10-25T09:30:00Z",
+      "bindingSource": "codex_auth_seat_registry",
+      "anomalies": []
+    },
+    {
+      "accountId": null,
+      "seatSession": "reused@rig-b",
+      "rigName": "rig-b",
+      "boundAt": null,
+      "bindingSource": null,
+      "anomalies": [
+        {
+          "kind": "seat_with_no_account",
+          "seat": "reused@rig-b",
+          "evidence": "seat reused@rig-b in rig rig-b has no bound account",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": null,
+      "seatSession": "idle@rig-b",
+      "rigName": "rig-b",
+      "boundAt": null,
+      "bindingSource": null,
+      "anomalies": [
+        {
+          "kind": "seat_with_no_account",
+          "seat": "idle@rig-b",
+          "evidence": "seat idle@rig-b in rig rig-b has no bound account",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": null,
+      "seatSession": "homed@rig-c",
+      "rigName": "rig-c",
+      "boundAt": null,
+      "bindingSource": null,
+      "anomalies": [
+        {
+          "kind": "seat_with_no_account",
+          "seat": "homed@rig-c",
+          "evidence": "seat homed@rig-c in rig rig-c has no bound account",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": null,
+      "seatSession": "bare@rig-c",
+      "rigName": "rig-c",
+      "boundAt": null,
+      "bindingSource": null,
+      "anomalies": [
+        {
+          "kind": "seat_with_no_account",
+          "seat": "bare@rig-c",
+          "evidence": "seat bare@rig-c in rig rig-c has no bound account",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": "never-saved",
+      "seatSession": "orphan@rig-d",
+      "rigName": "rig-d",
+      "boundAt": "2026-10-22T06:00:00Z",
+      "bindingSource": "codex_auth_seat_registry",
+      "anomalies": []
+    },
+    {
+      "accountId": null,
+      "seatSession": "pi@rig-d",
+      "rigName": "rig-d",
+      "boundAt": null,
+      "bindingSource": null,
+      "anomalies": [
+        {
+          "kind": "seat_with_no_account",
+          "seat": "pi@rig-d",
+          "evidence": "seat pi@rig-d in rig rig-d has no bound account",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "accountId": null,
+      "seatSession": "term@rig-d",
+      "rigName": "rig-d",
+      "boundAt": null,
+      "bindingSource": null,
+      "anomalies": [
+        {
+          "kind": "seat_with_no_account",
+          "seat": "term@rig-d",
+          "evidence": "seat term@rig-d in rig rig-d has no bound account",
+          "asOf": "2026-10-27T12:00:00.000Z"
+        }
+      ]
+    }
+  ],
+  "signals": [
+    {
+      "provider": "codex",
+      "accountRef": "work",
+      "sourceClass": "provider_structured_read",
+      "authority": "account_cross_device",
+      "window": "five_hour",
+      "usedPercent": 41,
+      "resetsAt": "2026-10-27T15:00:00Z",
+      "windowDurationMins": 300,
+      "asOf": "2026-10-27T12:00:00.000Z",
+      "staleAfter": "2026-10-27T12:15:00Z",
+      "automationUse": "allow_switch_decision"
+    },
+    {
+      "provider": "codex",
+      "accountRef": "personal",
+      "sourceClass": "unknown",
+      "authority": "unknown",
+      "asOf": "2026-10-27T12:00:00.000Z",
+      "unknownReason": "no reading for this profile",
+      "automationUse": "do_not_automate"
+    },
+    {
+      "provider": "claude",
+      "seatSession": "pm@rig-a",
+      "sourceClass": "provider_statusline",
+      "authority": "account_cross_device",
+      "window": "weekly",
+      "usedPercent": 63,
+      "asOf": "2026-10-27T12:00:00.000Z",
+      "automationUse": "advisory_only"
+    },
+    {
+      "provider": "codex",
+      "seatSession": "driver-b@rig-a",
+      "sourceClass": "capture_fallback",
+      "authority": "reactive_error",
+      "asOf": "2026-10-27T12:00:00.000Z",
+      "unknownReason": "usage limit text seen in the pane",
+      "supportsNotification": true,
+      "automationUse": "do_not_automate"
+    },
+    {
+      "provider": "claude",
+      "seatSession": "reused@rig-b",
+      "sourceClass": "unknown",
+      "authority": "unknown",
+      "asOf": "2026-10-27T12:00:00.000Z",
+      "unknownReason": "claude_no_statusline_cache_yet",
+      "supportsNotification": false,
+      "automationUse": "do_not_automate"
+    }
+  ],
+  "asOf": "2026-10-27T12:00:00.000Z",
+  "hostUsage": [
+    {
+      "host": "local",
+      "provider": "claude",
+      "windows": [
+        {
+          "window": "weekly",
+          "usedPercent": 63,
+          "asOf": "2026-10-27T12:00:00.000Z",
+          "seatSession": "pm@rig-a"
+        }
+      ],
+      "provenance": {
+        "basis": "one_account_per_host_deployment_invariant",
+        "note": "host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted."
+      },
+      "anomalies": [],
+      "evidenceSeats": [
+        "pm@rig-a",
+        "reused@rig-b"
+      ],
+      "asOf": "2026-10-27T12:00:00.000Z",
+      "state": "ok"
+    },
+    {
+      "host": "local",
+      "provider": "codex",
+      "windows": [],
+      "provenance": {
+        "basis": "one_account_per_host_deployment_invariant",
+        "note": "host==account is a deployment invariant of this rig (one account per host), declared by the operator — it is not source-derived account classification, and no account identity is read or emitted."
+      },
+      "anomalies": [],
+      "evidenceSeats": [],
+      "asOf": "2026-10-27T12:00:00.000Z",
+      "state": "explicit_unknown",
+      "unknownReason": "no usage meter for codex on this host yet (the app-server read lane is a later seam); no fresh at-limit evidence either way"
+    }
+  ]
+}
