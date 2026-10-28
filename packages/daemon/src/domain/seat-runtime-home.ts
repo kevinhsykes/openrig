@@ -91,6 +91,17 @@ export function withoutRuntimeHomes(env: SeatEnv): SeatEnv {
 
 /** The Claude config root OpenRig reads for a seat: its own home when it declares one, else the daemon's selection, else
  *  `~/.claude`. */
+/** The runtime home the MEMBER itself declares in its own stored `env:`, exactly as stored (null when it declares none). Unlike
+ *  `seatRuntimeHome` it never falls through to the rig's declaration and does not set aside a value that isn't an absolute
+ *  path: it is what to write back to restore the member's env as it was. */
+export function memberRuntimeHome(db: Database.Database, nodeId: string | null | undefined, runtime: HomeRuntime): string | null {
+  if (!nodeId) return null;
+  try {
+    const row = db.prepare("SELECT env_json AS member FROM nodes WHERE id = ?").get(nodeId) as { member: string | null } | undefined;
+    return parseStoredSeatEnv(row?.member)?.[RUNTIME_HOME_VAR[runtime]] ?? null;
+  } catch { return null; } // A database from before seat env has no column to read.
+}
+
 export function claudeConfigRootFor(db: Database.Database, nodeId: string | null | undefined,
   env: NodeJS.ProcessEnv = process.env, homeDir = os.homedir()): string {
   return seatRuntimeHome(db, nodeId, "claude-code").home ?? env.CLAUDE_CONFIG_DIR ?? path.join(homeDir, ".claude");
