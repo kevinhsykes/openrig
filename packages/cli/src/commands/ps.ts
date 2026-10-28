@@ -1716,6 +1716,9 @@ interface FanOutHostResult {
   failedStep: import("../cross-host-types.js").FailedStep | "unsupported-transport";
   data?: unknown;
   error?: string;
+  /** P31: an ssh entry met by --all-hosts is a terminal-tile entry, not a fan-out target. It still appears (hosts[] is
+   *  omission-proof) but is a note, not a failure. Naming it with --hosts stays a failure. */
+  skipped?: boolean;
 }
 
 /** OPR.0.4.4.21 FR-5 — adapter to the intra-P4 shared contract
@@ -1774,6 +1777,11 @@ async function runFanOutPs(
         // R15-2 (shared contract): an SSH-declared host is a STRUCTURED
         // unsupported-transport status — never prose-only, never silently
         // thinner output.
+        if (!opts.hosts) {
+          const httpIds = allHosts.filter((h) => h.transport === "http").map((h) => h.id);
+          return { host: id, ok: false, skipped: true, failedStep: "unsupported-transport",
+            error: `skipped: ssh entry for terminal tiles; fan-out uses ${httpIds.length > 0 ? httpIds.join(", ") : "an http entry (none declared)"}` };
+        }
         return { host: id, ok: false, failedStep: "unsupported-transport", error: `host ${id} uses transport ${host.transport}; HTTP fan-out requires transport: http` };
       }
       const httpHost = host as HttpHostEntry;
@@ -1817,7 +1825,7 @@ async function runFanOutPs(
     }),
   );
 
-  const hasFailure = results.some((r) => !r.ok);
+  const hasFailure = results.some((r) => !r.ok && !r.skipped);
 
   if (opts.json) {
     // OPR.0.4.4.21 FR-5 — the intra-P4 shared payload (ONE contract with
@@ -1871,7 +1879,7 @@ async function runFanOutPs(
         console.log(`\n[host=${r.host}]`);
         console.log(JSON.stringify(r.data, null, 2));
       } else {
-        console.log(`\n[host=${r.host}] FAILED (${r.failedStep}): ${r.error}`);
+        console.log(r.skipped ? `\n[host=${r.host}] ${r.error}` : `\n[host=${r.host}] FAILED (${r.failedStep}): ${r.error}`);
       }
     }
   }
