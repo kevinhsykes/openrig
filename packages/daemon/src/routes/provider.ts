@@ -11,7 +11,7 @@ import type { TmuxAdapter } from "../adapters/tmux.js";
 import { snapshotLaunchOutcome } from "../domain/restore-orchestrator.js";
 import { resolveActiveSnapshotSession } from "../domain/active-occupant.js";
 import { readClaudeSeatTokenRef } from "../domain/claude-seat-token.js";
-import { KNOWN_PROVIDER_KINDS_LABEL, isKnownProviderKind, knownProviderKinds, type ProviderKind } from "../domain/provider/provider-types.js";
+import { knownProviderKinds, type ProviderKind } from "../domain/provider/provider-types.js";
 import { claudeConfigRootFor, seatRuntimeHome } from "../domain/seat-runtime-home.js";
 import { checkMoveReport, credentialRefusal, findCredential, MOVE_REPORT_TAG, readMoveReport, renderMoveReport, type MoveReport } from "../domain/provider/subscription-move-report.js";
 import { QueueRepositoryError, type QueueRepository } from "../domain/queue-repository.js";
@@ -244,9 +244,12 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     const asked = Array.isArray(body["providers"])
       ? body["providers"]
       : [body["provider"] === undefined ? "codex" : body["provider"]];
-    const bad = asked.find((p) => !isKnownProviderKind(p));
+    // The live list, as every other validator. A kind that is not a built-in (a collector rail) has no remote refresh reader or
+    // deadline: this host's own leg refreshes its feed, and each remote host's leg is a NAMED failure, `provider_has_no_reader`
+    // (usage-across-hosts.ts remote()), returned before any request is sent.
+    const bad = asked.find((p) => typeof p !== "string" || !knownProviderKinds().includes(p));
     if (asked.length === 0 || bad !== undefined) {
-      return c.json({ error: `usage windows can be refreshed for ${KNOWN_PROVIDER_KINDS_LABEL} (got ${asked.length === 0 ? "none" : shown(bad)})` }, 400);
+      return c.json({ error: `usage windows can be refreshed for ${knownProviderKinds().join(", ")} (got ${asked.length === 0 ? "none" : shown(bad)})` }, 400);
     }
     const providers = [...new Set(asked as ProviderKind[])];
     const hosts = body["hosts"];
