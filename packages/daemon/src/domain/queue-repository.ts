@@ -3119,11 +3119,13 @@ export class QueueRepository {
         const where = invalidFields.map((f) => f === "summary"
           ? "summary persists on a human-seat park, or on its own (rig queue update <id> --summary … with no --state)"
           : "evidenceRef persists on a human-seat park or a done close").join("; ");
-        throw new QueueRepositoryError(
-          "summary_evidence_not_persistable",
-          `${where}; the '${input.state}' transition cannot store ${invalidFields.length > 1 ? "them" : "it"}. Remove ${flags}, or use one of those.`,
-          { invalidFields },
-        );
+        const them = invalidFields.length > 1 ? "them" : "it";
+        // A park that names a blocker which isn't a person: say which value was refused and what is accepted (the words only;
+        // what is accepted is isPersonAddress, above).
+        const message = input.state === "blocked" && effectiveBlockedOn
+          ? `'${effectiveBlockedOn}' is not a person this daemon recognizes, so this park cannot store ${them}. ${flags} persist on a park only when --on is a human seat (human@kernel, human@host, human-<name>@kernel, human-<name>@host), a <name>@external address, or a registered person's address or alias. Park on one of those, or remove ${flags}.`
+          : `${where}; the '${input.state}' transition cannot store ${them}. Remove ${flags}, or use one of those.`;
+        throw new QueueRepositoryError("summary_evidence_not_persistable", message, { invalidFields });
       }
     }
 
