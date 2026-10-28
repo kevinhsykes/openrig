@@ -94,15 +94,15 @@ describe("view-composer partition vectors", () => {
     expect(v.opened[0]!.readOnly).toBe(true);
   });
 
-  it("ssh host → ssh '<user@target>' tmux attach -t (destination shell-quoted); read-only adds -r", () => {
+  it("ssh host → ssh -tt '<user@target>' tmux attach -t (destination shell-quoted); read-only adds -r", () => {
     const rw = composeView("v", [member({ seat: "s@r", host: "vm1", tmuxSession: "s@r" })], ctxWith([SSH_HOST]));
-    expect(rw.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
+    expect(rw.opened[0]!.paneCommand).toBe(`ssh -tt ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
 
     const ro = composeView("v", [member({ seat: "s@r", host: "vm1", readOnly: true })], ctxWith([SSH_HOST]));
-    expect(ro.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", true).map(shellQuote).join(" "))}`);
+    expect(ro.opened[0]!.paneCommand).toBe(`ssh -tt ${shellQuote('admin@vm1.local')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", true).map(shellQuote).join(" "))}`);
 
     const nouser = composeView("v", [member({ seat: "s@r", host: "vm2" })], ctxWith([SSH_HOST_NO_USER]));
-    expect(nouser.opened[0]!.paneCommand).toBe(`ssh ${shellQuote('10.0.0.9')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
+    expect(nouser.opened[0]!.paneCommand).toBe(`ssh -tt ${shellQuote('10.0.0.9')} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
   });
 
   // Guard G1 — the ssh destination is STRUCTURED registry data injected into a
@@ -113,7 +113,7 @@ describe("view-composer partition vectors", () => {
     const v = composeView("v", [member({ seat: "s@r", host: "evil", tmuxSession: "s@r" })], ctxWith([NASTY]));
     expect(v.opened).toHaveLength(1);
     // single-quoted, embedded quote POSIX-escaped ('\'') — metacharacters are literal.
-    expect(v.opened[0]!.paneCommand).toBe(`ssh ${shellQuote("u'x@a b; rm -rf /")} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
+    expect(v.opened[0]!.paneCommand).toBe(`ssh -tt ${shellQuote("u'x@a b; rm -rf /")} ${shellQuote(tileAttachArgv("tmux", [], "s@r", false).map(shellQuote).join(" "))}`);
     // the dangerous run never becomes its own shell word:
     expect(v.opened[0]!.paneCommand).not.toContain("; rm -rf / tmux");
   });

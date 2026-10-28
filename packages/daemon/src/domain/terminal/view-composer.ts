@@ -9,7 +9,7 @@
 //                      (tmux = the daemon-resolved absolute executable)
 //   view-only / cross-rig (read-only)
 //                    → the same reattach command with read-only `-r`
-//   ssh host         → `ssh <dest> <reattach command>`
+//   ssh host         → `ssh -tt <dest> <reattach command>`
 //   http host        → NO pane; honest-degrade { seat, host, reason }
 //   dead / no session → absent[] (named, never silently dropped)
 //
@@ -172,7 +172,9 @@ export function composeView(
         seat: m.seat,
         ...(m.runtime ? { runtime: m.runtime } : {}),
         label: m.label,
-        paneCommand: `ssh ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
+        // An interactive tmux attachment needs a remote PTY even when the user's
+        // SSH config says RequestTTY no or the provider starts with piped stdin.
+        paneCommand: `ssh -tt ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
         recoveryCommand: `ssh ${shellQuote(dest)} ${shellQuote(`tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`)}`,
         readOnly: m.readOnly,
       });
