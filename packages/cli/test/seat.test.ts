@@ -754,6 +754,26 @@ describe("rig seat status", () => {
     expect(output).not.toContain("restore packet) was delivered");
   });
 
+  it("handover rebuild human output names an unconfirmed PRIMING packet, not a restore packet", async () => {
+    const reason = "the input box could not be observed";
+    const deps = makeDeps({ status: 200, data: {
+      ...HANDOVER_RESULT_FRESH,
+      source: { mode: "rebuild", ref: null, raw: "rebuild", defaulted: false },
+      restorePacket: { status: "unconfirmed", packet: "priming", reason },
+      sideEffects: { ...HANDOVER_RESULT_FRESH.sideEffects, startupContextDelivered: false },
+    } }, []);
+
+    const { logs, exitCode } = await captureLogs(async () => {
+      await makeCommand(deps).parseAsync(["node", "rig", "seat", "handover", "dev-impl@seat-rig", "--source", "rebuild", "--reason", "context-wall"]);
+    });
+
+    const output = logs.join("\n");
+    expect(exitCode).toBeUndefined();
+    expect(output).toContain(`The rebuild priming packet was sent to the successor, but its submission is unconfirmed: ${reason}.`);
+    expect(output).toContain("Check the successor's screen before sending the context again");
+    expect(output).not.toContain("restore packet");
+  });
+
   it("handover surfaces a loud step-named failure (successor_create_failed)", async () => {
     const deps = makeDeps({
       status: 500,

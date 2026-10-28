@@ -87,7 +87,9 @@ export interface SeatHandoverMutationResult {
     startupContextDelivered: boolean;
     provenanceRecordWritten: false;
   };
-  restorePacket?: { status: "unconfirmed"; reason: string };
+  /** The context packet was sent but its submission is unconfirmed. `packet: "priming"` marks a rebuild's priming packet;
+   *  absent means the restore packet (the original meaning of this field). */
+  restorePacket?: { status: "unconfirmed"; reason: string; packet?: "priming" };
   /** OPR.0.5.5.5 — per-source execution outcome. fork: the resolved fork origin;
    *  rebuild: EXACTLY which durable artifacts primed the successor, which
    *  declared addresses were gaps, and (when the chain is empty) the named
@@ -689,6 +691,7 @@ export class SeatHandoverService {
       const notUp = await this.gateTerminalSuccessor(node, launch);
       if (notUp) return notUp;
       const delivered = await this.deliverRebuildPrimingPacket(launch.tmuxSession, {
+        runtime: node.runtime,
         seatRef: input.seatRef,
         reason,
         departingSession: latestSession.session_name,
@@ -707,7 +710,11 @@ export class SeatHandoverService {
           guidance: "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
         };
       }
-      contextDelivered = true;
+      if (delivered.confirmation === "unconfirmed") {
+        restorePacket = { status: "unconfirmed", packet: "priming", reason: delivered.reason };
+      } else {
+        contextDelivered = true;
+      }
     }
 
     // 4. Verify continuity + rebind via the EXISTING discovered->commit path.
@@ -1033,6 +1040,7 @@ export class SeatHandoverService {
   private async deliverRebuildPrimingPacket(
     successorSession: string,
     info: {
+      runtime: string | null;
       seatRef: string;
       reason: string;
       departingSession: string;
@@ -1040,7 +1048,7 @@ export class SeatHandoverService {
       gaps: string[];
       emptyChainReason?: string;
     },
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  ): Promise<RestorePacketDelivery> {
     const lines = [
       `# Seat rebuild handover — ${info.seatRef}`,
       `You are a REBUILT successor for this seat (reason: ${info.reason}, at ${this.now().toISOString()}). Your predecessor session was ${info.departingSession}; its live context was deliberately NOT carried. Prime yourself from the durable artifacts below, highest trust first.`,
@@ -1056,17 +1064,7 @@ export class SeatHandoverService {
     if (info.emptyChainReason) {
       lines.push("", `The durable chain is EMPTY: ${info.emptyChainReason}. You start from seat identity alone — say so in your first status report.`);
     }
-    const sent = await this.tmuxAdapter.sendText(successorSession, lines.join("\n"));
-    if (!sent.ok) {
-      return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
-    }
-    // Same spike-proven 200ms settle as the restore packet (staged-not-consumed class).
-    await this.sleep(200);
-    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
-    if (!submit.ok) {
-      return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
-    }
-    return { ok: true };
+    return this.submitPacketWithEvidence(successorSession, lines.join("\n"), info.runtime);
   }
 
   /** Deliver the captured restore packet to a fresh successor via the shipped
@@ -1090,6 +1088,12 @@ export class SeatHandoverService {
     },
   ): Promise<RestorePacketDelivery> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
+    return this.submitPacketWithEvidence(successorSession, packet, info.runtime);
+  }
+
+  /** The shared paste-then-submit tail for a handover's context packet (restore and rebuild priming): type it, submit it,
+   *  and, for a Claude successor, read the composer for evidence the packet was consumed. */
+  private async submitPacketWithEvidence(successorSession: string, packet: string, runtime: string | null): Promise<RestorePacketDelivery> {
     const sent = await this.tmuxAdapter.sendText(successorSession, packet);
     if (!sent.ok) {
       return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
@@ -1104,7 +1108,7 @@ export class SeatHandoverService {
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }
-    if (info.runtime === "claude-code") {
+    if (runtime === "claude-code") {
       const afterSubmit = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
       if (afterSubmit.state === "clear") return { ok: true, confirmation: "confirmed" };
       if (afterSubmit.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterSubmit.reason === "unobservable"

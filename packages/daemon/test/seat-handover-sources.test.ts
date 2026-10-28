@@ -623,6 +623,112 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
       expect(log).not.toContain("launch");
     });
   });
+
+  // P14b: the rebuild priming packet goes through the same paste-then-submit tail as the restore packet, so a packet left
+  // staged in a Claude composer is a named failure with the same unwind, not a success. The screen is modelled per Enter
+  // count: `afterEnter[n]` is what the composer shows after the n-th Enter (null = the screen cannot be read).
+  describe("a claude-code rebuild: the priming packet needs submission evidence", () => {
+    let packet: string;
+    let enters: number;
+    let screens: (string | null)[];
+    const emptyComposer = "Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
+    const stagedComposer = () => `Claude Code v2.1.303\n${packet.split("\n").map((line, i) => i === 0 ? `❯ ${line}` : `  ${line}`).join("\n")}\n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
+
+    function seedClaudeSeat() {
+      const rig = rigRepo.createRig("seat-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/project" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateStartupStatus(session.id, "ready", "2026-04-20T12:00:00Z");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%0" });
+      return { node };
+    }
+    function claudeService(): SeatHandoverService {
+      return new SeatHandoverService({
+        db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux(),
+        now: () => new Date("2026-04-24T18:30:00.000Z"),
+        newSuccessorId: () => "01SUCCID0",
+        runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness: async () => ({ ok: true, resumeToken: "tok", resumeType: "claude_name" }), checkReady: async () => ({ ready: true }) } as never },
+        contextUsageStore: { readSidecar } as never,
+        rebuildPrimingResolver: rebuildChain as never,
+        rebuildArtifactExists: artifactExists as never,
+        readinessTimeoutMs: 50,
+        sleep: async () => {},
+      });
+    }
+    const rebuild = () => claudeService().handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+
+    beforeEach(() => {
+      packet = ""; enters = 0; screens = [];
+      sendText.mockImplementation(async (_s: string, text: string) => { if (text.startsWith("# Seat rebuild handover")) packet = text; return { ok: true }; });
+      sendKeys.mockImplementation(async (_s: string, keys: string[]) => { if (packet && keys.includes("Enter")) enters += 1; return { ok: true }; });
+      capturePaneScreen.mockImplementation(async () => {
+        if (!packet || enters === 0) return emptyComposer;
+        const screen = screens[Math.min(enters, screens.length) - 1];
+        return screen === undefined ? emptyComposer : screen === "STAGED" ? stagedComposer() : screen;
+      });
+    });
+
+    it("a packet still staged in the composer after the guarded retry is a named failure that unwinds the successor", async () => {
+      const { node } = seedClaudeSeat();
+      screens = ["STAGED", "STAGED"];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: false, code: "context_delivery_failed" });
+      if (result.ok) throw new Error("expected a failure");
+      expect(result.message).toContain("deliver-rebuild-priming");
+      expect(result.message).toContain("the prompt still looked staged in the input box");
+      expect(enters).toBe(2);
+      expect(db.prepare("SELECT status FROM discovered_sessions WHERE tmux_session = ?").get("dev-impl@seat-rig")).toMatchObject({ status: "vanished" });
+      expect(killSession).not.toHaveBeenCalled();
+      expect(nodeRow(node.id).handover_result).not.toBe("complete");
+    });
+
+    it("a packet submitted at once is delivered: one Enter, no retry, no unconfirmed note", async () => {
+      seedClaudeSeat();
+      screens = [emptyComposer];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true } } });
+      expect((result as { result: Record<string, unknown> }).result.restorePacket).toBeUndefined();
+      expect(enters).toBe(1);
+    });
+
+    it("a packet staged after the first Enter and submitted by the guarded retry is delivered", async () => {
+      seedClaudeSeat();
+      screens = ["STAGED", emptyComposer];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true } } });
+      expect(enters).toBe(2);
+    });
+
+    it("an input box that cannot be read does not fail the handover: it is recorded as an unconfirmed priming packet", async () => {
+      seedClaudeSeat();
+      screens = [null];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: true, result: {
+        restorePacket: { status: "unconfirmed", packet: "priming", reason: "the input box could not be observed" },
+        sideEffects: { startupContextDelivered: false },
+      } });
+      expect(enters).toBe(1);
+    });
+
+    it("a Claude restore packet keeps its own unconfirmed record, with no packet discriminator", async () => {
+      seedClaudeSeat();
+      capturePaneScreen.mockImplementation(async () => null);
+      sendText.mockImplementation(async (_s: string, text: string) => { if (text.startsWith("=== OpenRig seat handover")) packet = text; return { ok: true }; });
+      const result = await claudeService().handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "fresh" });
+      expect(result).toMatchObject({ ok: true, result: { restorePacket: { status: "unconfirmed", reason: "the input box could not be observed" } } });
+      expect((result as { result: { restorePacket: Record<string, unknown> } }).result.restorePacket.packet).toBeUndefined();
+    });
+
+    it("a codex rebuild is unchanged: one Enter, the screen is never read for evidence", async () => {
+      seedSeat();
+      sendText.mockImplementation(async (_s: string, text: string) => { if (text.startsWith("# Seat rebuild handover")) packet = text; return { ok: true }; });
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true } } });
+      expect(enters).toBe(1);
+      expect((result as { result: Record<string, unknown> }).result.restorePacket).toBeUndefined();
+    });
+  });
 });
 
 
