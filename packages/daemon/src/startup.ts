@@ -58,6 +58,7 @@ import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
 import { ProviderAccountReadingsStore } from "./domain/provider/provider-account-readings.js";
 import { claudeAuthStatusReader } from "./domain/provider/claude-auth-status-reader.js";
+import { realClaudeConfigDirProbe } from "./domain/provider/claude-config-dir.js";
 import { ClaudeUsageWindows, latestClaudeWindowSamples } from "./domain/provider/claude-usage-windows.js";
 import { prepareCodexSeatFolder, prepareCodexTeamWorkspace } from "./domain/codex-team-workspace.js";
 import { resolveCodexGitAddDirs } from "./domain/codex-git-add-dirs.js";
@@ -1431,7 +1432,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       ),
       agentActivityStore,
       // A Claude seat switch checks what would outrank the seat's own token before it stops anything.
-      claudePrecedence: (nodeId: string, opts?: { storedLogin?: boolean }) => claudeManagedLaunch.credentialPrecedence(nodeId, opts),
+      claudePrecedence: (nodeId: string, opts?: { storedLogin?: boolean; configDir?: string }) => claudeManagedLaunch.credentialPrecedence(nodeId, opts),
+      // A move between Claude accounts reads the target config dir's login: one bounded `claude auth status` with that dir selected.
+      claudeConfigDirProbe: realClaudeConfigDirProbe({ launchPath: process.env.PATH, home: daemonHome }),
       // Slice 01: Codex and Claude usage windows, off unless provider.usage_windows is on (read per call). The native
       // readers (Codex's app-server; Claude's auth status, for identity) run only on an explicit refresh, with the
       // PATH, HOME, CODEX_HOME and CLAUDE_CONFIG_DIR a seat session gets. Claude's windows are the seats' status-line

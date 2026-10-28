@@ -1,5 +1,7 @@
 import fs from "node:fs";
+import path from "node:path";
 import { Command } from "commander";
+import { readClaudeAccountsFile } from "@openrig/daemon/claude-config-dir";
 import { DaemonClient, DaemonTimeoutError } from "../client.js";
 import { getDaemonStatus, getDaemonUrl , daemonStatusGuard} from "../daemon-lifecycle.js";
 import { KNOWN_PROVIDER_KINDS_LABEL, isKnownProviderKind } from "@openrig/daemon/provider-types";
@@ -23,7 +25,7 @@ export const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 
 type Peer = { logicalId: string; sessionName: string | null; home?: "same" | "different" | "unknown"; effect: string; step?: string };
 type SeatView = { home?: string; activity?: string; peers: Peer[] };
-type SwitchReport = { home?: string; account: string; tokenFile?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
+type SwitchReport = { home?: string; account: string; tokenFile?: string; configDir?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
   restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean };
 
 // A switch waits as long as `rig seat restart` does: the seat's in-place restart runs inside it.
@@ -39,18 +41,44 @@ function printSeat(seat: SeatView): void {
   }
 }
 
-type AccountOpts = { toAccount?: string; tokenFile?: string; storedLogin?: boolean };
+type AccountOpts = { toAccount?: string; tokenFile?: string; storedLogin?: boolean; configDir?: string; accountsFile?: string };
 
-/** The account a switch names: a Codex login's saved name, a Claude token's label with its file, or a Claude seat's stored
- *  login. Null when neither --to-account nor --stored-login was given. */
-function targetAccount(opts: AccountOpts): { toAccount: string; tokenFile?: string | null } | null {
+/** Names the file that declares the Claude accounts (config-dir homes); `--accounts-file` wins over this variable. */
+const CLAUDE_ACCOUNTS_FILE_ENV = "OPENRIG_CLAUDE_ACCOUNTS_FILE";
+
+type Target = { toAccount: string; tokenFile?: string | null; configDir?: string };
+
+/** The account a switch names: a Codex login's saved name, a Claude token's label with its file, a Claude seat's stored
+ *  login, or a Claude account's config dir (by `--config-dir`, or by a `--to-account` label the accounts file declares).
+ *  Null when none was given; a string when the options contradict each other or the accounts file can't be used. */
+function targetAccount(opts: AccountOpts, env: NodeJS.ProcessEnv = process.env): Target | null | string {
+  if (opts.configDir !== undefined) {
+    if (opts.tokenFile !== undefined || opts.storedLogin) return "--config-dir can't be combined with --token-file or --stored-login.";
+    if (!path.isAbsolute(opts.configDir)) return `--config-dir ${opts.configDir} isn't an absolute path.`;
+    return { toAccount: opts.toAccount ?? path.basename(opts.configDir), configDir: path.resolve(opts.configDir) };
+  }
   if (opts.storedLogin) return { toAccount: "stored-login", tokenFile: null };
   if (!opts.toAccount) return null;
+  // A label with no token file may name a declared Claude account; a Codex login name or any other label passes through unchanged.
+  const file = opts.accountsFile ?? env[CLAUDE_ACCOUNTS_FILE_ENV];
+  if (opts.tokenFile === undefined && file) {
+    const read = readClaudeAccountsFile(file);
+    if (!read.ok) return opts.accountsFile ? read.reason : { toAccount: opts.toAccount };
+    const match = read.accounts.find((a) => a.key === opts.toAccount || a.label === opts.toAccount);
+    if (match) return { toAccount: match.key, configDir: match.dir };
+  }
   return { toAccount: opts.toAccount, ...(opts.tokenFile !== undefined ? { tokenFile: opts.tokenFile } : {}) };
 }
 
-function printClaude(claude: { label: string; tokenFile: string | null; checked: string[]; notChecked: string[]; instead?: string }): void {
-  console.log(`Claude token: ${claude.tokenFile ? `"${claude.label}", read from ${claude.tokenFile} when Claude starts` : "none (the config dir's stored login)"}`);
+/** What to say when no account was named, or the options couldn't make one. */
+function noTarget(problem: string | null): void {
+  console.error(problem ?? "Name the account: --to-account <name> (with --token-file <path> for a Claude seat), --config-dir <path> or a --to-account label from the accounts file for a Claude seat, or --stored-login for a Claude seat.");
+  process.exitCode = 1;
+}
+
+function printClaude(claude: { label: string; tokenFile: string | null; configDir?: string; checked: string[]; notChecked: string[]; instead?: string }): void {
+  if (claude.configDir) console.log(`Claude config dir: ${claude.configDir} ("${claude.label}")`);
+  else console.log(`Claude token: ${claude.tokenFile ? `"${claude.label}", read from ${claude.tokenFile} when Claude starts` : "none (the config dir's stored login)"}`);
   if (claude.instead) console.log(`instead of the stored login, the seat would use ${claude.instead}`);
   if (claude.checked.length) console.log(`checked for anything that outranks it: ${claude.checked.join("; ")}`);
   if (claude.notChecked.length) console.log(`not checked (the seat's /status shows what it uses): ${claude.notChecked.join("; ")}`);
@@ -512,21 +540,20 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
     .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
+    .option("--config-dir <path>", "Claude: move the seat to another account's config dir (absolute path); its stored login there is what the seat uses")
+    .option("--accounts-file <path>", `Claude: the file declaring the account config dirs, so --to-account can name one by label (default: $${CLAUDE_ACCOUNTS_FILE_ENV})`)
     .option("--json", "Output as parseable JSON")
     .action(async (opts: AccountOpts & { seat: string; json?: boolean }) => {
       const target = targetAccount(opts);
-      if (!target) {
-        console.error("Name the account: --to-account <name> (with --token-file <path> for a Claude seat), or --stored-login for a Claude seat.");
-        process.exitCode = 1;
-        return;
-      }
+      if (!target || typeof target === "string") return noTarget(typeof target === "string" ? target : null);
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
         return;
       }
       const qs = new URLSearchParams({ seat: opts.seat, toAccount: target.toAccount,
-        ...(target.tokenFile === null ? { storedLogin: "1" } : target.tokenFile !== undefined ? { tokenFile: target.tokenFile } : {}) });
+        ...(target.configDir !== undefined ? { configDir: target.configDir }
+          : target.tokenFile === null ? { storedLogin: "1" } : target.tokenFile !== undefined ? { tokenFile: target.tokenFile } : {}) });
       const res = await client.get<{ safe: boolean; reasons?: string[]; message?: string; seat?: SeatView;
         claude?: Parameters<typeof printClaude>[0] }>(`/api/provider/precheck?${qs.toString()}`);
       if (handleHttpError(res, "precheck")) return;
@@ -547,6 +574,8 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--to-account <a>", "Codex: the login's saved name in the seat's Codex home (rig auth list --codex-home <home>). Claude: your label for the token")
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
     .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
+    .option("--config-dir <path>", "Claude: move the seat to another account's config dir (absolute path); its stored login there is what the seat uses")
+    .option("--accounts-file <path>", `Claude: the file declaring the account config dirs, so --to-account can name one by label (default: $${CLAUDE_ACCOUNTS_FILE_ENV})`)
     .option("--force-unsafe", "Kept for scripts; a seat's checks can't be overridden, since each means nothing safe to restart or no such login")
     .option("--json", "Output as parseable JSON")
     .addHelpText("after", `
@@ -579,14 +608,19 @@ save it. That environment is Claude's, so the tools, hooks and MCP servers it st
 environment writes it into the transcript. A token-authenticated seat can make model requests but can't use claude.ai
 connectors or Remote Control; its local MCP servers still work. --stored-login moves it back to the config dir's stored login;
 a CLAUDE_CODE_OAUTH_TOKEN the seat still receives outranks that login, and the report says which token it will use. Claude's
-/status shows token auth with no account email, so the label is yours, not an observed account.`)
+/status shows token auth with no account email, so the label is yours, not an observed account.
+
+A Claude seat moves to another account's config dir with --config-dir <absolute path>, or with --to-account <label> when the
+accounts file (--accounts-file, else $${CLAUDE_ACCOUNTS_FILE_ENV}) declares that label. The seat's own CLAUDE_CONFIG_DIR is set to that
+dir, which holds that account's stored login, and the seat is relaunched in its own pane on the same conversation, as above.
+The daemon first checks that the dir exists, that one bounded claude auth status with that dir selected reports a claude.ai
+login, that nothing outranks that login (the same environment and settings checks, read from the target dir's settings.json),
+and that the seat holds no token reference of its own (move it back with --stored-login first). One switch runs at a time
+per seat. The report prints the command that moves the seat back to the dir it ran on. Claude's /status after a tool turn is
+the evidence of the account in use.`)
     .action(async (opts: AccountOpts & { seat: string; forceUnsafe?: boolean; json?: boolean }) => {
       const target = targetAccount(opts);
-      if (!target) {
-        console.error("Name the account: --to-account <name> (with --token-file <path> for a Claude seat), or --stored-login for a Claude seat.");
-        process.exitCode = 1;
-        return;
-      }
+      if (!target || typeof target === "string") return noTarget(typeof target === "string" ? target : null);
       const client = await getClient(getDeps());
       if (!client) {
         process.exitCode = 1;
@@ -622,6 +656,11 @@ a CLAUDE_CODE_OAUTH_TOKEN the seat still receives outranks that login, and the r
             console.log(`to restore the home's saved credential bytes: ${seat.undo}`);
             console.log("undo restores saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
           }
+        } else if (seat?.configDir) {
+          console.log(`Claude config dir: ${seat.configDir} ("${seat.account}")${seat.loginChanged ? " (set)" : ""}`);
+          for (const warning of seat.warnings ?? []) console.log(`warning: ${warning}`);
+          if (seat.conversation) console.log(`conversation: ${seat.conversation}`);
+          if (seat.undo) console.log(`to switch back: ${seat.undo}`);
         } else if (seat) {
           console.log(`Claude token: ${seat.tokenFile ? `"${seat.account}", read from ${seat.tokenFile}` : "the config dir's stored login"}${seat.loginChanged
             ? seat.tokenApplied === false ? " (reference saved; the token didn't take effect)" : " (set)" : ""}`);
