@@ -18,5 +18,10 @@ export default defineConfig({
     // test module so the whole-suite fold gate is hermetic (see
     // test/hermetic-env.setup.ts); production env behavior is untouched.
     setupFiles: ["./test/hermetic-env.setup.ts"],
+    // These files already exercise up to eight real CLI children concurrently.
+    // Bound file-level workers on the shared CI runner so that nested process
+    // batches do not starve the separate five-second public-entrypoint checks.
+    // Keep their latency assertions and the eight-process contract unchanged.
+    ...(process.env.CI ? { maxWorkers: 1, minWorkers: 1 } : {}),
   },
 });
