@@ -1619,7 +1619,12 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         const compact = compactOutputEnabled() ? compactShow(transformed) : null;
         printResult(json, compact ? compact.item : transformed, res.status);
         // Notices go to stderr, as transitions' does, so stdout stays one JSON document an agent can parse.
-        if (!json && bodyTruncated) {
+        // The bounded-preview note prints in BOTH modes: in JSON mode the cut body rides the same
+        // `body` field as a complete body, and agents read the run output, not the side fields —
+        // the note is what makes the preview impossible to miss (rows were misread as complete
+        // without it). The JSON contract is untouched: stdout bytes, body, bodyBytes,
+        // bodyTruncated and readView are exactly as before; the note is stderr-only.
+        if (bodyTruncated) {
           console.error(`… (bounded preview — complete body is ${bodyBytes} bytes; full record ${view.fullJsonBytes} JSON bytes: ${fullCommand})`);
         }
         if (compact && compact.emptyOmitted.length > 0) console.error(showEmptyNotice(compact.emptyOmitted, fullCommand));
