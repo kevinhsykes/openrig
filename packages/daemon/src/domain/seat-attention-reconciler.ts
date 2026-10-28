@@ -131,21 +131,28 @@ async function describeLineageFailure(input: {
 
 /** Rebind one managed seat to the sole pane currently in its named tmux
  * session and positively identify its declared agent runtime. */
-/** A binding write that follows awaited reads must still be about the seat it read. Captures the node's latest session
- * now; the returned check holds only while that session is still the latest, has not ended, and the node still has a
- * binding row. A checked stop's final transaction marks the session exited and clears the binding, and a handover or
- * launch mints a newer session, so each makes a late write refuse instead of restoring a stale binding (P20b/P20c).
- * The check and the write that follows it run in one synchronous turn, as the stop's final transaction does, so one
- * of them always sees the other. This is the fence for paths that do not hold the per-node lifecycle lease. */
+/** A binding write that follows awaited reads must still be about the seat AND the binding it read. Captures, now, the
+ * node's latest session and its binding tuple (attachment type, tmux session, tmux pane); the returned check holds only
+ * while that session is still the latest and has not ended, and the binding still has exactly that tuple. So it refuses
+ * after: a checked stop's final transaction (session exited, binding cleared); a handover or launch (newer session); and a
+ * same-session replacement of the pane or session name by another operation (the late write would put the stale pane
+ * back). A node with no binding at capture time never passes: there is nothing to re-resolve (P20b/P20c).
+ * The check and the write that follows it run in one synchronous turn, as the stop's final transaction does, so one of
+ * them always sees the other. This is the fence for paths that do not hold the per-node lifecycle lease. */
 export function currentBindingGuard(sessionRegistry: SessionRegistry, nodeId: string): () => boolean {
   const latest = () => sessionRegistry.db.prepare(
     "SELECT id, status FROM sessions WHERE node_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
   ).get(nodeId) as { id: string; status: string } | undefined;
+  const bindingKey = () => {
+    const b = sessionRegistry.getBindingForNode(nodeId);
+    return b ? JSON.stringify([b.attachmentType ?? null, b.tmuxSession ?? null, b.tmuxPane ?? null]) : null;
+  };
   const started = latest()?.id ?? null;
+  const startedBinding = bindingKey();
   return () => {
     const now = latest();
-    return started !== null && now?.id === started && !["exited", "detached", "superseded"].includes(now.status)
-      && sessionRegistry.getBindingForNode(nodeId) != null;
+    return started !== null && startedBinding !== null && now?.id === started
+      && !["exited", "detached", "superseded"].includes(now.status) && bindingKey() === startedBinding;
   };
 }
 
@@ -434,6 +441,10 @@ export class SeatAttentionReconciler {
       return { ok: false, code: "not_in_attention", detail: `Session '${sessionName}' not found` };
     }
 
+    // Captured here, before ANY await below (the restore branch awaits a reconcile before the identity rebind): the write
+    // must be about the seat and binding this call started from, not the ones present when it finally gets to write.
+    const bindingStillCurrent = currentBindingGuard(sessionRegistry, session.nodeId);
+
     const startupClassActive = session.startupStatus === "attention_required" || session.startupStatus === "failed";
     const derivedOutcome = this.getDerivedAttentionOutcome(session);
     const identityClassActive = this.getActiveIdentityVerdict(session, sessionName);
@@ -564,7 +575,7 @@ export class SeatAttentionReconciler {
         listProcesses: this.deps.listProcesses,
         // This route does not hold the per-node lease (a draft-aware seat would refuse it, and it would wait out a whole
         // stop): the write is conditional on the seat still being the one read instead.
-        assertCurrent: currentBindingGuard(sessionRegistry, session.nodeId),
+        assertCurrent: bindingStillCurrent,
       });
       if (!identity.ok) {
         return {

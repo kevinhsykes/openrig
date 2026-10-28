@@ -2320,6 +2320,8 @@ export class RestoreOrchestrator {
     rigId: string,
     nodeId: string,
   ): Promise<ReconcileNodeResult> {
+    // Captured before any await (see currentBindingGuard): the rebind write below is conditional on this seat and binding.
+    const bindingStillCurrent = currentBindingGuard(this.sessionRegistry, nodeId);
     // Locate the latest restore attempt for this rig.
     const startedRow = this.db.prepare(
       "SELECT seq, payload FROM events WHERE rig_id = ? AND type = 'restore.started' ORDER BY seq DESC LIMIT 1"
@@ -2427,7 +2429,7 @@ export class RestoreOrchestrator {
       resumeRotation: rotation,
       ...(this.listProcesses ? { listProcesses: this.listProcesses } : {}),
       // reconcileNodeRuntimeTruth runs from the clear-attention route without the node's lease (P20c).
-      assertCurrent: currentBindingGuard(this.sessionRegistry, nodeId),
+      assertCurrent: bindingStillCurrent,
     });
     if (!identity.ok) {
       return { ok: false, code: "process_lineage_mismatch", detail: identity.detail };

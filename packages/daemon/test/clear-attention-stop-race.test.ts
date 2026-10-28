@@ -75,6 +75,29 @@ describe("currentBindingGuard (the shared fence for binding writes that follow a
     handedOver.s.registry.updateStatus(successor.id, "running");
     expect(handedOver.still()).toBe(false); handedOver.s.db.close();
   });
+  it("fails when another operation replaces the pane or session name of the SAME session (minimax round 3)", () => {
+    const swapped = seat(); const still = currentBindingGuard(swapped.registry, swapped.node.id);
+    expect(still()).toBe(true);
+    swapped.registry.updateBinding(swapped.node.id, { tmuxSession: swapped.name, tmuxPane: "%8" });
+    expect(still()).toBe(false); // RED if only the row's existence is compared
+    swapped.db.close();
+    const renamed = seat(); const stillRenamed = currentBindingGuard(renamed.registry, renamed.node.id);
+    renamed.registry.updateBinding(renamed.node.id, { tmuxSession: "other-name", tmuxPane: "%1" });
+    expect(stillRenamed()).toBe(false); renamed.db.close();
+  });
+  it("clearAttention does not write back a stale pane over a same-session replacement made during its reads", async () => {
+    const s = seat();
+    try {
+      const replace = () => s.registry.updateBinding(s.node.id, { tmuxSession: s.name, tmuxPane: "%8" });
+      const result = await reconciler(s, replace).clearAttention(s.name);
+      expect(s.registry.getBindingForNode(s.node.id)?.tmuxPane).toBe("%8"); // the other operation's pane, not the stale %7
+      expect(result.ok).toBe(false);
+    } finally { s.db.close(); }
+  });
+  it("a node with no binding at capture time never passes", () => {
+    const s = seat(); s.registry.clearBinding(s.node.id);
+    try { expect(currentBindingGuard(s.registry, s.node.id)()).toBe(false); } finally { s.db.close(); }
+  });
   it("a node with no session never passes", () => {
     const s = seat();
     try { s.db.prepare("DELETE FROM sessions").run(); expect(currentBindingGuard(s.registry, s.node.id)()).toBe(false); } finally { s.db.close(); }
