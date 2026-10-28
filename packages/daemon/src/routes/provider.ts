@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
+import { claudeConfigDirsShareConversation } from "../domain/provider/claude-config-dir.js";
 import { Hono, type Context } from "hono";
 import { getSelfHostId, LOCAL_HOST_ID } from "../domain/hosts/fanout-contract.js";
 import { loadHostRegistry } from "../domain/hosts/hosts-registry-reader.js";
@@ -68,6 +70,12 @@ export function claudeSeatOf(c: Context): ClaudeSeatRelaunch {
       const home = seatRuntimeHome(rigRepo.db, nodeId, "claude-code");
       return { declared: home.source === "member" ? home.home ?? null : null, effective: claudeConfigRootFor(rigRepo.db, nodeId) };
     },
+    inheritedConfigDir: (nodeId) => {
+      const home = seatRuntimeHome(rigRepo.db, nodeId, "claude-code", { ignoreMember: true });
+      const selected = home.home ?? process.env.CLAUDE_CONFIG_DIR ?? null;
+      return { effective: selected ?? path.join(os.homedir(), ".claude"), selected };
+    },
+    canResumeInConfigDir: (nodeId, dir, conversation) => claudeConfigDirsShareConversation(claudeConfigRootFor(rigRepo.db, nodeId), dir, conversation),
     // The seat's own (member) env, which restore, launch and handover all read through getEffectiveSeatEnv.
     setConfigDir: (nodeId, dir) => {
       if (!rigRepo.setNodeEnvVar(nodeId, "CLAUDE_CONFIG_DIR", dir)) throw Object.assign(new Error("the seat's env couldn't be written"), { code: "seat_env_unwritable" });
@@ -334,8 +342,11 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     const tokenFile = c.req.query("storedLogin") === "1" ? null : c.req.query("tokenFile");
     // Or the config dir of another Claude account, for a move between accounts.
     const configDir = c.req.query("configDir");
+    const inheritValue = c.req.query("inheritConfigDir");
+    if (inheritValue !== undefined && inheritValue !== "1" && inheritValue !== "0") return c.json({ error: "inheritConfigDir must be 1 or 0" }, 400);
+    const inheritConfigDir = inheritValue === "1";
     // An unsafe verdict is a valid 200 response, not an error.
-    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
+    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}), ...(inheritConfigDir ? { inheritConfigDir } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 
   router.post("/switch", async (c) => {
@@ -366,11 +377,13 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "tokenFile must be a path, or null for the stored login" }, 400);
     }
     const configDir = body["configDir"];
+    const inheritConfigDir = body["inheritConfigDir"];
+    if (inheritConfigDir !== undefined && typeof inheritConfigDir !== "boolean") return c.json({ error: "inheritConfigDir must be a boolean" }, 400);
     if (configDir !== undefined && typeof configDir !== "string") {
       return c.json({ error: "configDir must be an absolute path" }, 400);
     }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}) },
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}), ...(inheritConfigDir !== undefined ? { inheritConfigDir } : {}) },
       seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 

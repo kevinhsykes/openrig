@@ -5,6 +5,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import { findClaudeTranscriptByToken } from "../continuity-policy-materializer.js";
 import { claudeAuthStatusReader, type ClaudeAuthReader } from "./claude-auth-status-reader.js";
 
 /** One declared account: the file's key, its display label, and the absolute path of its config dir. */
@@ -68,6 +69,22 @@ export function claudeConfigDirPresent(dir: string): boolean {
   try { return fs.statSync(dir).isDirectory(); } catch { return false; }
 }
 
+/** A move can resume only when both native roots reach the same live transcript.
+ * Separate copies can diverge while the seat runs; this gate never copies history or credentials. */
+export function claudeConfigDirsShareConversation(source: string, target: string, token: string | null): boolean {
+  if (!token || !/^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(token)) return false;
+  try {
+    const from = findClaudeTranscriptByToken(path.join(source, "projects"), token);
+    const to = findClaudeTranscriptByToken(path.join(target, "projects"), token);
+    if (!from || !to) return false;
+    const a = fs.statSync(from), b = fs.statSync(to);
+    const sourceProject = fs.statSync(path.dirname(from)), targetProject = fs.statSync(path.dirname(to));
+    return a.isFile() && b.isFile() && a.dev === b.dev && a.ino === b.ino
+      && sourceProject.isDirectory() && targetProject.isDirectory()
+      && sourceProject.dev === targetProject.dev && sourceProject.ino === targetProject.ino;
+  } catch { return false; }
+}
+
 /** What one config dir's login reads as: the `claude auth status --json` answer with that dir selected, or why it gave none.
  *  `email` is the account's own address, kept for the view the person asked for; nothing else about the login leaves. */
 export type ClaudeConfigDirLogin =
@@ -76,15 +93,15 @@ export type ClaudeConfigDirLogin =
   | { state: "unreadable"; reason: string; detail: string };
 
 /** Probes one config dir's login state. The probe is injected: tests pass a fake, and the daemon and CLI pass `realClaudeConfigDirProbe`. */
-export type ClaudeConfigDirProbe = (dir: string) => Promise<ClaudeConfigDirLogin>;
+export type ClaudeConfigDirProbe = (dir: string, selection?: { selected: string | null }) => Promise<ClaudeConfigDirLogin>;
 
 /** The probe over the real `claude` binary, bounded and process-group-stopped as `claudeAuthStatusReader` is. */
-export function realClaudeConfigDirProbe(options: { launchPath?: string; home?: string; reader?: (dir: string) => ClaudeAuthReader } = {}): ClaudeConfigDirProbe {
-  const readerFor = options.reader ?? ((dir: string) => claudeAuthStatusReader({
+export function realClaudeConfigDirProbe(options: { launchPath?: string; home?: string; reader?: (dir: string | null) => ClaudeAuthReader } = {}): ClaudeConfigDirProbe {
+  const readerFor = options.reader ?? ((dir: string | null) => claudeAuthStatusReader({
     ...(options.launchPath ? { launchPath: options.launchPath } : {}), ...(options.home ? { home: options.home } : {}), claudeConfigDir: dir }));
-  return async (dir) => {
+  return async (dir, selection) => {
     let answer: Awaited<ReturnType<ClaudeAuthReader>>;
-    try { answer = await readerFor(dir)(); }
+    try { answer = await readerFor(selection ? selection.selected : dir)(); }
     catch (err) { return { state: "unreadable", reason: "spawn_failed", detail: `the reader failed: ${err instanceof Error ? err.message : String(err)}` }; }
     if (answer.ok) return { state: "logged_in", email: answer.auth.email, subscriptionType: answer.auth.subscriptionType };
     if (answer.reason === "not_logged_in") return { state: "not_logged_in" };

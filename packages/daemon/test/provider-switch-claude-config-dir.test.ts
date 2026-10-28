@@ -44,6 +44,7 @@ function harness(opts: {
   const claudeSeat: ClaudeSeatRelaunch = {
     seat: () => ({ nodeId: "node-a", rigId: "rig-1", rigName: "rig", logicalId: "dev.a", running: opts.running ?? true, pane: opts.pane === undefined ? "%7" : opts.pane }),
     tokenRef: () => opts.ref ?? null,
+    canResumeInConfigDir: () => true,
     setTokenRef: (_nodeId, next) => { calls.push(`setTokenRef ${next ? next.label : "null"}`); },
     ...(opts.noHooks ? {} : {
       configDir: (_nodeId: string) => ({ declared, effective: declared ?? effective }),
@@ -88,7 +89,7 @@ describe("rig provider switch --seat --config-dir moves a Claude seat to another
     ]);
     expect(r).toMatchObject({ outcome: "rebind_in_progress", message: expect.stringContaining(`on the config dir ${dir} ("golisano")`), seat: {
       seat: SEAT, account: "golisano", configDir: dir, conversation: "conv-1", loginChanged: true,
-      undo: `rig provider switch --seat ${SEAT} --config-dir '/home/test/.claude'`,
+      undo: `rig provider switch --seat ${SEAT} --config-dir '/home/test/.claude' --inherit-config-dir`,
       next: expect.stringContaining("/status"),
     } });
     expect(h.declared()).toBe(dir);
@@ -213,7 +214,7 @@ describe("rig provider switch --seat --config-dir moves a Claude seat to another
     const h = harness({ relaunch: { ok: false, effect: "unknown", code: "failed", message: "The pane couldn't be respawned." } });
     const r = await h.svc.switchAccount(to("golisano", dir), h.seatRestart, h.claudeSeat);
     expect(r).toMatchObject({ outcome: "unknown", reasons: ["relaunch_failed"], message: expect.stringContaining("may have been ended"), seat: {
-      configDir: dir, loginChanged: true, undo: `rig provider switch --seat ${SEAT} --config-dir '/home/test/.claude'`,
+      configDir: dir, loginChanged: true, undo: `rig provider switch --seat ${SEAT} --config-dir '/home/test/.claude' --inherit-config-dir`,
       restart: { recoveryCommand: "rig launch rig dev.a --snapshot-id snap-1", remainingStep: expect.stringContaining(`rig seat stop ${SEAT}`) } } });
     expect(h.declared()).toBe(dir);
     expect(h.calls.filter((call) => call.startsWith("relaunch"))).toHaveLength(1);
@@ -272,5 +273,58 @@ describe("rig provider switch --seat --config-dir moves a Claude seat to another
     expect(JSON.stringify(r)).not.toContain("someone@example.test");
     // No token variable is named in a move that sets none.
     expect(JSON.stringify(r)).not.toMatch(/CLAUDE_CODE_OAUTH_TOKEN|sk-ant/);
+  });
+
+  it("undo restores an inherited config selection instead of pinning its effective default", async () => {
+    const inherited = accountDir("inherited"), target = accountDir("other");
+    const h = harness({ effective: inherited });
+    Object.assign(h.claudeSeat, { inheritedConfigDir: () => ({ effective: inherited, selected: null }) });
+    const moved = await h.svc.switchAccount(to("other", target), h.seatRestart, h.claudeSeat);
+    expect(moved.seat?.undo).toContain("--inherit-config-dir");
+    const restored = await h.svc.switchAccount({ ...to("inherited", inherited), inheritConfigDir: true }, h.seatRestart, h.claudeSeat);
+    expect(restored.outcome).toBe("rebind_in_progress");
+    expect(restored.seat?.configDirInherited).toBe(true);
+    expect(h.declared()).toBeNull();
+    expect(h.calls.at(-1)).toContain("on no declared dir");
+  });
+
+  it("a target without the same native conversation refuses before changing the env or process", async () => {
+    const h = harness();
+    h.claudeSeat.canResumeInConfigDir = () => false;
+    const result = await h.svc.switchAccount(to("other", accountDir()), h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "failed_safely", reasons: ["config_dir_conversation_unavailable"] });
+    expect(h.declared()).toBeNull();
+    expect(h.calls.some((call) => call.startsWith("setConfigDir") || call.startsWith("relaunch"))).toBe(false);
+  });
+
+  it("an undo refuses if the inherited home changed since its command was printed", async () => {
+    const old = accountDir("old"), current = accountDir("current");
+    const h = harness({ declared: accountDir("selected") });
+    Object.assign(h.claudeSeat, { inheritedConfigDir: () => ({ effective: current, selected: current }) });
+    const result = await h.svc.switchAccount({ ...to("old", old), inheritConfigDir: true }, h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "failed_safely", reasons: ["invalid_config_dir"] });
+    expect(h.calls).toEqual(["exclusive node-a"]);
+  });
+
+  it("a native selection change during login probing refuses even when its directory is identical", async () => {
+    const inherited = accountDir("inherited"), selected = accountDir("selected");
+    const h = harness({ effective: inherited, declared: selected });
+    let reads = 0;
+    Object.assign(h.claudeSeat, { inheritedConfigDir: () => ({ effective: inherited, selected: reads++ === 0 ? null : inherited }) });
+    const result = await h.svc.switchAccount({ ...to("inherited", inherited), inheritConfigDir: true }, h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "failed_safely", reasons: ["invalid_config_dir"] });
+    expect(h.declared()).toBe(selected);
+    expect(h.calls.some((call) => call.startsWith("setConfigDir") || call.startsWith("relaunch"))).toBe(false);
+  });
+
+  it("a refused inherited relaunch restores the member override before returning unchanged", async () => {
+    const inherited = accountDir("inherited"), selected = accountDir("selected");
+    const h = harness({ effective: inherited, declared: selected,
+      relaunch: { ok: false, effect: "none", code: "awaiting-decision", message: "decide" } });
+    Object.assign(h.claudeSeat, { inheritedConfigDir: () => ({ effective: inherited, selected: inherited }) });
+    const result = await h.svc.switchAccount({ ...to("inherited", inherited), inheritConfigDir: true }, h.seatRestart, h.claudeSeat);
+    expect(result).toMatchObject({ outcome: "failed_safely" });
+    expect(h.declared()).toBe(selected);
+    expect(h.calls.filter((call) => call.startsWith("setConfigDir"))).toEqual(["setConfigDir null", `setConfigDir ${selected}`]);
   });
 });

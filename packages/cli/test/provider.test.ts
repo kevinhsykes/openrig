@@ -307,6 +307,19 @@ describe("rig provider switch|precheck --config-dir moves a Claude seat to anoth
     expect(logs).toContain("next: check /status");
   });
 
+  it("the inherited undo flag reaches both switch and precheck, and requires an expected directory", async () => {
+    const posted: Array<Record<string, unknown>> = [];
+    const args = ["--seat", "s1", "--config-dir", "/home/u/.claude", "--inherit-config-dir"];
+    await run(["switch", ...args], deps((_p, body) => { posted.push(body); return ok; }));
+    expect(posted[0]).toMatchObject({ configDir: "/home/u/.claude", inheritConfigDir: true });
+    const paths: string[] = [];
+    await run(["precheck", ...args], deps(undefined, (p) => { paths.push(p); return { status: 200, data: { safe: true } }; }));
+    expect(paths.some((p) => p.includes("inheritConfigDir=1"))).toBe(true);
+    const refused = await run(["switch", "--seat", "s1", "--inherit-config-dir"], deps());
+    expect(refused.exitCode).toBe(1);
+    expect(refused.logs.join("\n")).toContain("requires the expected --config-dir");
+  });
+
   it("--to-account names a declared account by key or label through --accounts-file, and only the dir and key reach the daemon", async () => {
     try {
       const file = accountsFile();

@@ -34,6 +34,7 @@ describe("RigRepository.setNodeEnvVar", () => {
     expect(repo.getEffectiveSeatEnv(node.id)).toMatchObject({ KEEP_ME: "1" });
     repo.setNodeEnvVar(node.id, "CLAUDE_CONFIG_DIR", "/member");
     expect(lifecycle.configDir!(node.id)).toEqual({ declared: "/member", effective: "/member" });
+    expect(lifecycle.inheritedConfigDir!(node.id)).toEqual({ effective: "/rig/after", selected: "/rig/after" });
   });
   it("sets one variable in the member's env, keeping the others, and the seat's launch reads it", () => {
     const { db, repo, node } = fixture();

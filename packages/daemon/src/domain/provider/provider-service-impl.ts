@@ -237,7 +237,7 @@ export class ProviderServiceImpl implements ProviderService {
   async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<PrecheckResult> {
     const claude = claudeSeat?.seat(input.seat);
     if (claude) return (await checkClaudeSeat(input, claude, this.deps.claudePrecedence, { relaunch: claudeSeat, probe: this.deps.claudeConfigDirProbe })).verdict;
-    if (input.configDir !== undefined) return { safe: false, reasons: ["rebind_unsupported_for_runtime"] };
+    if (input.configDir !== undefined || input.inheritConfigDir) return { safe: false, reasons: ["rebind_unsupported_for_runtime"] };
     if (seatRestart) return (await this.seatPrecheck(input, seatRestart)).verdict;
     const model = await this.getReadModel();
     const target = model.accounts.find((a) => a.accountId === input.toAccount);
@@ -255,7 +255,7 @@ export class ProviderServiceImpl implements ProviderService {
   async switchAccount(input: ProviderSwitchInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<ProviderSwitchResult> {
     const claude = claudeSeat?.seat(input.seat);
     if (claudeSeat && claude) return switchClaudeSeat(input, claudeSeat, claude, this.deps.claudePrecedence, this.deps.claudeConfigDirProbe);
-    if (input.configDir !== undefined) return { outcome: "failed_safely", reasons: ["rebind_unsupported_for_runtime"] };
+    if (input.configDir !== undefined || input.inheritConfigDir) return { outcome: "failed_safely", reasons: ["rebind_unsupported_for_runtime"] };
     if (seatRestart) return this.switchSeat(input, seatRestart);
     // Precheck-gate: never switch past an unsafe verdict unless explicitly forced.
     const verdict = await this.precheck({ seat: input.seat, toAccount: input.toAccount });

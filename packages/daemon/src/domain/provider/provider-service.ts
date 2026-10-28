@@ -17,6 +17,8 @@ export interface ProviderPrecheckInput {
   tokenFile?: string | null;
   /** A Claude seat's move to another account's config dir (absolute); `toAccount` is the label for it. Not with a token file. */
   configDir?: string;
+  /** Remove the member override only if configDir still matches the inherited home. */
+  inheritConfigDir?: boolean;
 }
 
 export interface ProviderSwitchInput {
@@ -26,6 +28,7 @@ export interface ProviderSwitchInput {
   /** As on the precheck. */
   tokenFile?: string | null;
   configDir?: string;
+  inheritConfigDir?: boolean;
 }
 
 /**
@@ -58,6 +61,10 @@ export interface ClaudeSeatRelaunch {
   /** The seat's config dir: `declared` is its own `CLAUDE_CONFIG_DIR` from `env:` (null when it declares none), `effective` the
    *  dir its launches use. Optional: a host that doesn't lend it doesn't do config-dir moves. */
   configDir?(nodeId: string): { declared: string | null; effective: string };
+  /** Selection without the member override; null selected preserves native unset semantics. */
+  inheritedConfigDir?(nodeId: string): { effective: string; selected: string | null };
+  /** True only when the target native root sees the same live conversation file. */
+  canResumeInConfigDir?(nodeId: string, dir: string, conversation: string | null): boolean;
   /** Sets (or, with null, removes) the seat's own `CLAUDE_CONFIG_DIR`; the next launch reads it. */
   setConfigDir?(nodeId: string, dir: string | null): void;
   /** A snapshot taken now, and whether restoring this seat from it resumes its conversation. */
@@ -85,6 +92,8 @@ export interface SeatSwitchReport {
   tokenFile?: string;
   /** Claude, config-dir move: the account home the seat now runs on. */
   configDir?: string;
+  /** The effective directory is inherited; the member override was removed. */
+  configDirInherited?: boolean;
   /** Claude: the conversation the relaunch resumes. */
   conversation?: string | null;
   /** Whether the seat's login source is now `account`. */

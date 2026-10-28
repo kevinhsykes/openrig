@@ -24,7 +24,7 @@ export const USAGE_ACROSS_HOSTS_REFRESH_TIMEOUT_MS = 75_000;
 
 type Peer = { logicalId: string; sessionName: string | null; home?: "same" | "different" | "unknown"; effect: string; step?: string };
 type SeatView = { home?: string; activity?: string; peers: Peer[] };
-type SwitchReport = { home?: string; account: string; tokenFile?: string; configDir?: string; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
+type SwitchReport = { home?: string; account: string; tokenFile?: string; configDir?: string; configDirInherited?: boolean; conversation?: string | null; loginChanged: boolean; undo: string | null; peers: Peer[];
   restart?: { recoveryCommand?: string; remainingStep?: string }; next?: string; warnings?: string[]; tokenApplied?: boolean };
 
 // A switch waits as long as `rig seat restart` does: the seat's in-place restart runs inside it.
@@ -43,21 +43,22 @@ function printSeat(seat: SeatView): void {
 const terminalText = (value: string): string => value.replace(/[\x00-\x1f\x7f-\x9f]/g, "");
 const jsonOutput = (value: unknown): string => JSON.stringify(value).replace(/[\x7f-\x9f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
 
-type AccountOpts = { toAccount?: string; tokenFile?: string; storedLogin?: boolean; configDir?: string; accountsFile?: string };
+type AccountOpts = { toAccount?: string; tokenFile?: string; storedLogin?: boolean; configDir?: string; accountsFile?: string; inheritConfigDir?: boolean };
 
 /** Names the file that declares the Claude accounts (config-dir homes); `--accounts-file` wins over this variable. */
 const CLAUDE_ACCOUNTS_FILE_ENV = "OPENRIG_CLAUDE_ACCOUNTS_FILE";
 
-type Target = { toAccount: string; tokenFile?: string | null; configDir?: string };
+type Target = { toAccount: string; tokenFile?: string | null; configDir?: string; inheritConfigDir?: boolean };
 
 /** The account a switch names: a Codex login's saved name, a Claude token's label with its file, a Claude seat's stored
  *  login, or a Claude account's config dir (by `--config-dir`, or by a `--to-account` label the accounts file declares).
  *  Null when none was given; a string when the options contradict each other or the accounts file can't be used. */
 function targetAccount(opts: AccountOpts, env: NodeJS.ProcessEnv = process.env): Target | null | string {
+  if (opts.inheritConfigDir && opts.configDir === undefined) return "--inherit-config-dir requires the expected --config-dir path.";
   if (opts.configDir !== undefined) {
     if (opts.tokenFile !== undefined || opts.storedLogin) return "--config-dir can't be combined with --token-file or --stored-login.";
     if (!path.isAbsolute(opts.configDir)) return `--config-dir ${opts.configDir} isn't an absolute path.`;
-    return { toAccount: opts.toAccount ?? path.basename(opts.configDir), configDir: path.resolve(opts.configDir) };
+    return { toAccount: opts.toAccount ?? path.basename(opts.configDir), configDir: path.resolve(opts.configDir), ...(opts.inheritConfigDir ? { inheritConfigDir: true } : {}) };
   }
   if (opts.storedLogin) return { toAccount: "stored-login", tokenFile: null };
   if (!opts.toAccount) return null;
@@ -577,6 +578,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
     .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
     .option("--config-dir <path>", "Claude: move the seat to another account's config dir (absolute path); its stored login there is what the seat uses")
+    .option("--inherit-config-dir", "Claude: restore the inherited selection if it still matches --config-dir; remove the seat override")
     .option("--accounts-file <path>", `Claude: the file declaring the account config dirs, so --to-account can name one by label (default: $${CLAUDE_ACCOUNTS_FILE_ENV})`)
     .option("--json", "Output as parseable JSON")
     .action(async (opts: AccountOpts & { seat: string; json?: boolean }) => {
@@ -590,6 +592,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
       target = await targetForSeat(opts, target, client);
       if (typeof target === "string") return noTarget(target);
       const qs = new URLSearchParams({ seat: opts.seat, toAccount: target.toAccount,
+        ...(target.inheritConfigDir ? { inheritConfigDir: "1" } : {}),
         ...(target.configDir !== undefined ? { configDir: target.configDir }
           : target.tokenFile === null ? { storedLogin: "1" } : target.tokenFile !== undefined ? { tokenFile: target.tokenFile } : {}) });
       const res = await client.get<{ safe: boolean; reasons?: string[]; message?: string; seat?: SeatView;
@@ -613,6 +616,7 @@ export function providerCommand(depsOverride?: StatusDeps): Command {
     .option("--token-file <path>", "Claude: the absolute path of a 0600 file holding the seat's own subscription token; it's read only as Claude starts")
     .option("--stored-login", "Claude: move the seat back to its config dir's stored login")
     .option("--config-dir <path>", "Claude: move the seat to another account's config dir (absolute path); its stored login there is what the seat uses")
+    .option("--inherit-config-dir", "Claude: restore the inherited selection if it still matches --config-dir; remove the seat override")
     .option("--accounts-file <path>", `Claude: the file declaring the account config dirs, so --to-account can name one by label (default: $${CLAUDE_ACCOUNTS_FILE_ENV})`)
     .option("--force-unsafe", "Kept for scripts; a seat's checks can't be overridden, since each means nothing safe to restart or no such login")
     .option("--json", "Output as parseable JSON")
@@ -654,7 +658,10 @@ dir, which holds that account's stored login, and the seat is relaunched in its 
 The daemon first checks that the dir exists, that one bounded claude auth status with that dir selected reports a claude.ai
 login, that nothing outranks that login (the same environment and settings checks, read from the target dir's settings.json),
 and that the seat holds no token reference of its own (move it back with --stored-login first). One switch runs at a time
-per seat. The report prints the command that moves the seat back to the dir it ran on. Claude's /status after a tool turn is
+per seat. Before a move stops the seat, both config dirs must reach the same native project directory and conversation file. A missing transcript
+or a separate copy refuses the move; history and credentials are never copied. An undo from an inherited config selection
+prints --inherit-config-dir with the expected home. If that inherited selection changed, the undo refuses.
+The report prints the command that moves the seat back to the dir it ran on. Claude's /status after a tool turn is
 the evidence of the account in use.`)
     .action(async (opts: AccountOpts & { seat: string; forceUnsafe?: boolean; json?: boolean }) => {
       let target = targetAccount(opts);
@@ -697,7 +704,7 @@ the evidence of the account in use.`)
             console.log("undo restores saved credential bytes only; sign-in is unverified. Saved credentials may expire, be revoked, or be superseded by refresh elsewhere. Restart the affected seat and use the existing account verification; fresh sign-in may be required.");
           }
         } else if (seat?.configDir) {
-          console.log(`Claude config dir: ${seat.configDir} ("${seat.account}")${seat.loginChanged ? " (set)" : ""}`);
+          console.log(`Claude config dir: ${seat.configDir} ("${seat.account}")${seat.loginChanged ? seat.configDirInherited ? " (inherited)" : " (set)" : ""}`);
           for (const warning of seat.warnings ?? []) console.log(`warning: ${warning}`);
           if (seat.conversation) console.log(`conversation: ${seat.conversation}`);
           if (seat.undo) console.log(`to switch back: ${seat.undo}`);
