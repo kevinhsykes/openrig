@@ -15,6 +15,8 @@ export interface ProviderPrecheckInput {
   toAccount: string;
   /** A Claude seat's own subscription token file (absolute); null moves it back to its config dir's stored login. */
   tokenFile?: string | null;
+  /** A Claude seat's move to another account's config dir (absolute); `toAccount` is the label for it. Not with a token file. */
+  configDir?: string;
 }
 
 export interface ProviderSwitchInput {
@@ -23,6 +25,7 @@ export interface ProviderSwitchInput {
   forceUnsafe: boolean;
   /** As on the precheck. */
   tokenFile?: string | null;
+  configDir?: string;
 }
 
 /**
@@ -52,6 +55,11 @@ export interface ClaudeSeatRelaunch {
   seat(seat: string): { nodeId: string; rigId: string; rigName: string; logicalId: string; running: boolean; pane: string | null } | null;
   tokenRef(nodeId: string): ClaudeSeatTokenRef | null;
   setTokenRef(nodeId: string, ref: ClaudeSeatTokenRef | null): void;
+  /** The seat's config dir: `declared` is its own `CLAUDE_CONFIG_DIR` from `env:` (null when it declares none), `effective` the
+   *  dir its launches use. Optional: a host that doesn't lend it doesn't do config-dir moves. */
+  configDir?(nodeId: string): { declared: string | null; effective: string };
+  /** Sets (or, with null, removes) the seat's own `CLAUDE_CONFIG_DIR`; the next launch reads it. */
+  setConfigDir?(nodeId: string, dir: string | null): void;
   /** A snapshot taken now, and whether restoring this seat from it resumes its conversation. */
   snapshot(rigId: string, nodeId: string): { snapshotId: string; resumes: true; conversation: string | null } | { snapshotId: string; resumes: false; why: string };
   /** Runs `fn` holding the seat's lifecycle lease (the one its stop, launch and restore take), so no other one runs on the
@@ -64,7 +72,7 @@ export interface ClaudeSeatRelaunch {
 }
 
 /** What would outrank a Claude seat's own token at its next launch (`ClaudeManagedLaunch.credentialPrecedence`). */
-export type ClaudeCredentialPrecedence = (nodeId: string, opts?: { storedLogin?: boolean }) => Promise<CredentialPrecedence>;
+export type ClaudeCredentialPrecedence = (nodeId: string, opts?: { storedLogin?: boolean; configDir?: string }) => Promise<CredentialPrecedence>;
 
 /** What a seat switch did: for a Codex seat, in the Codex home it runs on; for a Claude seat, to its token reference. */
 export interface SeatSwitchReport {
@@ -75,6 +83,8 @@ export interface SeatSwitchReport {
   account: string;
   /** Claude: the token file the launch reads (a path; never its contents). */
   tokenFile?: string;
+  /** Claude, config-dir move: the account home the seat now runs on. */
+  configDir?: string;
   /** Claude: the conversation the relaunch resumes. */
   conversation?: string | null;
   /** Whether the seat's login source is now `account`. */

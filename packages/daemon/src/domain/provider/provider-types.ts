@@ -43,6 +43,7 @@ export interface ProviderAccount {
 }
 
 import type { HostUsageRow } from "./host-usage-rollup.js";
+import type { ClaudeConfigDirPrecheckReason } from "./claude-config-dir-reasons.js";
 
 export type BindingAnomalyKind = "same_account_on_n_seats" | "seat_with_no_account";
 
@@ -159,7 +160,8 @@ export type PrecheckReason =
   | "invalid_token_reference" // the label or the token file's path can't be a seat's reference
   | "token_file_unusable" // the token file wouldn't give Claude a token: missing, empty, not a file or unreadable
   | "credential_outranks_token" // a cloud provider, API key, auth token or apiKeyHelper would win over the seat's token
-  | "seat_not_running"; // nothing to relaunch: launch the seat first
+  | "seat_not_running" // nothing to relaunch: launch the seat first
+  | ClaudeConfigDirPrecheckReason;
 
 /** A seat on the same Codex home, as the in-place restart reports it (its `PeerReport`). Declared here rather than
  *  imported, so the provider types don't import the restart module and its tmux dependencies. */
@@ -181,6 +183,8 @@ export interface SeatSwitchView {
 export interface ClaudeSwitchView {
   label: string;
   tokenFile: string | null;
+  /** A config-dir move: the account home the seat would run on. */
+  configDir?: string;
   checked: string[];
   notChecked: string[];
   /** A move back to the stored login: the token the seat would still use instead, and where it comes from. */

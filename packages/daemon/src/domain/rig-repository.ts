@@ -8,7 +8,7 @@ import { resolve } from "node:path";
 import { ulid } from "ulid";
 import { deriveComposeProjectName } from "./compose-project-name.js";
 import type { ClaudeManagedBlockFile } from "./managed-blocks.js";
-import { mergeSeatEnv, parseStoredSeatEnv, type SeatEnv } from "./seat-env.js";
+import { mergeSeatEnv, parseStoredSeatEnv, validateSeatEnvName, type SeatEnv } from "./seat-env.js";
 import { withoutIgnoredRuntimeHomes } from "./seat-runtime-home.js";
 import { parseClaudeSeatTokenRef, type ClaudeSeatTokenRef } from "./claude-seat-token.js";
 import type {
@@ -804,6 +804,20 @@ export class RigRepository {
       .prepare("UPDATE nodes SET effort = NULL WHERE id = ?")
       .run(nodeId);
     return result.changes > 0;
+  }
+
+  /** Sets one variable in a seat's own (member) `env:`, or removes it with null, leaving the others as they are. A rig-level value
+   *  of the same name stays and is shadowed while the member declares it. False when the seat is unknown or the database predates
+   *  seat env. The name must be a valid seat env name and the value a non-empty string without NUL (as `validateSeatEnv` holds). */
+  setNodeEnvVar(nodeId: string, name: string, value: string | null): boolean {
+    if (!this.hasNodeColumn("env_json")) return false;
+    if (validateSeatEnvName(name) !== null || (value !== null && (value === "" || value.includes("\0")))) return false;
+    const row = this.db.prepare("SELECT env_json FROM nodes WHERE id = ?").get(nodeId) as { env_json: string | null } | undefined;
+    if (!row) return false;
+    const env: SeatEnv = { ...(parseStoredSeatEnv(row.env_json) ?? {}) };
+    if (value === null) delete env[name]; else env[name] = value;
+    return this.db.prepare("UPDATE nodes SET env_json = ? WHERE id = ?")
+      .run(Object.keys(env).length > 0 ? JSON.stringify(env) : null, nodeId).changes > 0;
   }
 
   /** A Claude seat's own subscription credential, by reference only; null clears it. */

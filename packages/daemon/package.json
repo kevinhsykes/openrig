@@ -94,6 +94,10 @@
     "./provider-types": {
       "types": "./dist/provider-types-surface.d.ts",
       "import": "./dist/provider-types-surface.js"
+    },
+    "./claude-config-dir": {
+      "types": "./dist/claude-config-dir-surface.d.ts",
+      "import": "./dist/claude-config-dir-surface.js"
     }
   },
   "scripts": {
