@@ -33,6 +33,7 @@ import type {
   ClaudeCredentialPrecedence,
   ClaudeSeatRelaunch,
 } from "./provider-service.js";
+import type { ClaudeConfigDirProbe } from "./claude-config-dir.js";
 import { checkClaudeSeat, switchClaudeSeat } from "./claude-seat-switch.js";
 import type { FourBlockReadModel, PrecheckResult, ProviderKind, ProviderSignal } from "./provider-types.js";
 import { isKnownProviderKind } from "./provider-types.js";
@@ -113,6 +114,8 @@ export interface ProviderServiceImplDeps {
   codexLogins?: CodexHomeLogins;
   /** What would outrank a Claude seat's own token; without it, Claude seats aren't moved. */
   claudePrecedence?: ClaudeCredentialPrecedence;
+  /** One config dir's login state (`claude auth status --json` with that dir selected); without it, a seat isn't moved between accounts. */
+  claudeConfigDirProbe?: ClaudeConfigDirProbe;
 }
 
 export class ProviderServiceImpl implements ProviderService {
@@ -221,7 +224,7 @@ export class ProviderServiceImpl implements ProviderService {
 
   async precheck(input: ProviderPrecheckInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<PrecheckResult> {
     const claude = claudeSeat?.seat(input.seat);
-    if (claude) return (await checkClaudeSeat(input, claude, this.deps.claudePrecedence)).verdict;
+    if (claude) return (await checkClaudeSeat(input, claude, this.deps.claudePrecedence, { relaunch: claudeSeat, probe: this.deps.claudeConfigDirProbe })).verdict;
     if (seatRestart) return (await this.seatPrecheck(input, seatRestart)).verdict;
     const model = await this.getReadModel();
     const target = model.accounts.find((a) => a.accountId === input.toAccount);
@@ -238,7 +241,7 @@ export class ProviderServiceImpl implements ProviderService {
 
   async switchAccount(input: ProviderSwitchInput, seatRestart?: SeatRestart, claudeSeat?: ClaudeSeatRelaunch): Promise<ProviderSwitchResult> {
     const claude = claudeSeat?.seat(input.seat);
-    if (claudeSeat && claude) return switchClaudeSeat(input, claudeSeat, claude, this.deps.claudePrecedence);
+    if (claudeSeat && claude) return switchClaudeSeat(input, claudeSeat, claude, this.deps.claudePrecedence, this.deps.claudeConfigDirProbe);
     if (seatRestart) return this.switchSeat(input, seatRestart);
     // Precheck-gate: never switch past an unsafe verdict unless explicitly forced.
     const verdict = await this.precheck({ seat: input.seat, toAccount: input.toAccount });

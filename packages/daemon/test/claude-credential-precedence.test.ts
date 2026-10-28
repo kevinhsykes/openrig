@@ -85,4 +85,21 @@ describe("what would outrank a Claude seat's own subscription token", () => {
     const found = await f.managed.credentialPrecedence("node");
     expect(found.notChecked).toContain(`user settings ${path.join(f.home, ".claude", "settings.json")} (not valid JSON)`);
   });
+
+  it("with a target config dir, it reads that dir's user settings and not the seat's own", async () => {
+    const f = fixture();
+    const target = path.join(f.home, "account-target");
+    mkdirSync(target);
+    // The seat's own dir holds a conflict; the target's holds a different one. A move to the target is judged by the target's.
+    writeFileSync(path.join(f.home, ".claude", "settings.json"), JSON.stringify({ apiKeyHelper: "/usr/local/bin/key" }));
+    writeFileSync(path.join(target, "settings.json"), JSON.stringify({ env: { ANTHROPIC_API_KEY: "k" } }));
+    const found = await f.managed.credentialPrecedence("node", { storedLogin: true, configDir: target });
+    expect(found.conflicts.map((c) => [c.name, c.source])).toEqual([["ANTHROPIC_API_KEY", `the env block of user settings ${path.join(target, "settings.json")}`]]);
+    expect(JSON.stringify(found)).not.toContain("apiKeyHelper");
+    expect(JSON.stringify(found)).not.toContain('"k"');
+    // A clean target is clear even though the seat's own dir isn't, and a call without a target still reads the seat's own dir.
+    writeFileSync(path.join(target, "settings.json"), JSON.stringify({ model: "opus" }));
+    expect((await f.managed.credentialPrecedence("node", { storedLogin: true, configDir: target })).conflicts).toEqual([]);
+    expect((await f.managed.credentialPrecedence("node", { storedLogin: true })).conflicts.map((c) => c.name)).toEqual(["apiKeyHelper"]);
+  });
 });

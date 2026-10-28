@@ -17,6 +17,14 @@ import {
   SEAT_REGISTRY_DISCLAIMER,
   type CodexAuthPaths,
 } from "../lib/codex-auth.js";
+import {
+  claudeConfigDirPresent,
+  readClaudeAccountsFile,
+  realClaudeConfigDirProbe,
+  type ClaudeAccount,
+  type ClaudeConfigDirLogin,
+  type ClaudeConfigDirProbe,
+} from "@openrig/daemon/claude-config-dir";
 import { localSelfHostId, originFor, runOnSshHost, type RunOnHostDeps } from "../lib/run-on-host.js";
 import { realDeps } from "./daemon.js";
 
@@ -29,17 +37,24 @@ export interface AuthCommandDeps {
   now?: () => string;
   /** `--host`: the host registry and the SSH runner (tests inject both). */
   host?: RunOnHostDeps;
+  /** `--runtime claude`: one config dir's login state (default: real `claude auth status --json` with that dir selected). */
+  claudeProbe?: ClaudeConfigDirProbe;
 }
+
+/** Names the file that declares the Claude accounts (config-dir homes); `--accounts-file` wins over this variable. */
+export const CLAUDE_ACCOUNTS_FILE_ENV = "OPENRIG_CLAUDE_ACCOUNTS_FILE";
 
 function fail(reason: string): void {
   console.error(`rig auth: ${reason}`);
   process.exitCode = 1;
 }
 
-// MVP supports only --runtime codex. Other runtimes are the SAME surface with a different flag
-// (future); reject non-codex now with a clear message rather than silently treating it as codex.
-function ensureRuntime(runtime: string): boolean {
-  if (runtime !== "codex") {
+// MVP supports --runtime codex. Other runtimes are the SAME surface with a different flag (future); reject them
+// with a clear message rather than silently treating them as codex. `--runtime claude` is the first of them, and
+// only for `status` and `list` (read-only: the declared accounts and each one's login state); a Claude seat moves
+// between accounts with `rig provider switch`, so the verbs that save, switch or validate a profile keep refusing.
+function ensureRuntime(runtime: string, readOnlyOk = false): boolean {
+  if (runtime !== "codex" && !(readOnlyOk && runtime === "claude")) {
     fail(`unsupported_runtime ${runtime} (MVP supports: codex)`);
     return false;
   }
@@ -50,6 +65,28 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
   const env = depsOverride?.env ?? process.env;
   const paths = (codexHome?: string): CodexAuthPaths => resolveCodexHome(codexHome ? { ...env, CODEX_HOME: codexHome } : env);
   const withRuntime = (c: Command): Command => c.option("--runtime <runtime>", "Runtime axis (MVP: codex)", "codex");
+  // status and list also take claude: its accounts are config-dir homes declared in a file, not profiles in a home.
+  const withReadRuntime = (c: Command): Command => c
+    .option("--runtime <runtime>", "Runtime axis (codex; claude for status and list)", "codex")
+    .option("--accounts-file <path>", `Claude: the file declaring the account config dirs (default: $${CLAUDE_ACCOUNTS_FILE_ENV})`);
+  type ClaudeOpts = { runtime: string; accountsFile?: string; host?: string };
+  const claudeAccounts = (opts: ClaudeOpts): ClaudeAccount[] | null => {
+    if (opts.host) { fail("--host isn't supported with --runtime claude: run it on that machine"); return null; }
+    const file = opts.accountsFile ?? env[CLAUDE_ACCOUNTS_FILE_ENV];
+    if (!file) { fail(`name the accounts file: --accounts-file <path> or ${CLAUDE_ACCOUNTS_FILE_ENV}`); return null; }
+    const read = readClaudeAccountsFile(file);
+    if (!read.ok) { fail(read.reason); return null; }
+    return read.accounts;
+  };
+  const probe = depsOverride?.claudeProbe ?? realClaudeConfigDirProbe({ launchPath: env.PATH, ...(env.HOME ? { home: env.HOME } : {}) });
+  // Per account: whether its dir exists, and, only when it does, its login state from ONE bounded `claude auth status`. A key's
+  // `has_credentials` or a file's presence in the dir is never read as login state (BR-3). Probes run together; each is bounded.
+  const claudeRows = (accounts: ClaudeAccount[]) => Promise.all(accounts.map(async (a) => {
+    const present = claudeConfigDirPresent(a.dir);
+    const login: ClaudeConfigDirLogin | null = present ? await probe(a.dir).catch((): ClaudeConfigDirLogin => ({ state: "unreadable", reason: "spawn_failed", detail: "the probe failed" })) : null;
+    const state = login === null ? "n/a (config dir missing)" : login.state === "unreadable" ? `unavailable (${login.reason})` : login.state;
+    return { account: a, present, state };
+  }));
   // Slice 18: the commands that move a Codex home act on a named home, here or on another registered machine.
   const withHome = (c: Command): Command => c
     .option("--codex-home <dir>", "The Codex home to act on (default: CODEX_HOME, else ~/.codex)")
@@ -70,10 +107,22 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
     "Manage agent auth profiles (CLI-local; runtime via --runtime). Tokens are never printed, logged, or stored.",
   );
 
-  withHome(withRuntime(auth.command("status")))
-    .description("Auth-file presence + login state (no secrets).")
-    .action(async (opts: HomeOpts) => {
-      if (!ensureRuntime(opts.runtime)) return;
+  withHome(withReadRuntime(auth.command("status")))
+    .description("Auth-file presence + login state (no secrets). --runtime claude: each declared account's config dir and login state.")
+    .action(async (opts: HomeOpts & ClaudeOpts) => {
+      if (!ensureRuntime(opts.runtime, true)) return;
+      if (opts.runtime === "claude") {
+        const accounts = claudeAccounts(opts);
+        if (!accounts) return;
+        for (const r of await claudeRows(accounts)) {
+          console.log(`account: ${r.account.key}`);
+          console.log(`label: ${r.account.label}`);
+          console.log(`config_dir: ${r.account.dir}`);
+          console.log(`config_dir_present: ${r.present ? "yes" : "no"}`);
+          console.log(`login_state: ${r.state}`);
+        }
+        return;
+      }
       if (opts.host) return onHost("status", [], opts);
       const r = authStatus(paths(opts.codexHome), { loginStatus: depsOverride?.loginStatus });
       console.log(`codex_home: ${r.codexHome}`);
@@ -85,10 +134,16 @@ export function authCommand(depsOverride?: AuthCommandDeps): Command {
       console.log(`login_status: ${r.loginStatus}`);
     });
 
-  withHome(withRuntime(auth.command("list")))
-    .description("List saved profiles by name.")
-    .action(async (opts: HomeOpts) => {
-      if (!ensureRuntime(opts.runtime)) return;
+  withHome(withReadRuntime(auth.command("list")))
+    .description("List saved profiles by name. --runtime claude: the declared accounts, one per line (key, label, config dir, present, login state).")
+    .action(async (opts: HomeOpts & ClaudeOpts) => {
+      if (!ensureRuntime(opts.runtime, true)) return;
+      if (opts.runtime === "claude") {
+        const accounts = claudeAccounts(opts);
+        if (!accounts) return;
+        for (const r of await claudeRows(accounts)) console.log([r.account.key, r.account.label, r.account.dir, r.present ? "yes" : "no", r.state].join("\t"));
+        return;
+      }
       if (opts.host) return onHost("list", [], opts);
       for (const name of authList(paths(opts.codexHome))) console.log(name);
     });

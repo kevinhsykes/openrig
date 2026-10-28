@@ -1,5 +1,8 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { providerCommand } from "../src/commands/provider.js";
 import { DaemonClient, DaemonTimeoutError } from "../src/client.js";
 import { STATE_FILE, type LifecycleDeps, type DaemonState } from "../src/daemon-lifecycle.js";
@@ -271,5 +274,104 @@ describe("rig provider switch --seat tells the person what follows", () => {
     expect(after.exitCode).toBe(1);
     expect(after.logs).toContain("recovery: rig launch rig dev.a --snapshot-id snap-1");
     expect(after.logs).toContain("If the pane shows no running Claude, stop the seat first.");
+  });
+});
+
+describe("rig provider switch|precheck --config-dir moves a Claude seat to another account's config dir", () => {
+  const ok = { status: 200, data: { outcome: "rebind_in_progress", message: "Relaunched.", seat: { account: "golisano", configDir: "/home/u/.claude-fleet", loginChanged: true,
+    conversation: "conv-1", undo: "rig provider switch --seat s1 --config-dir '/home/u/.claude-pro'", peers: [], next: "check /status" } } };
+  function deps(onPost: (path: string, body: Record<string, unknown>) => unknown = () => ok, onGet?: (path: string) => unknown): StatusDeps {
+    return { ...runningDeps(1), clientFactory: () => ({
+      post: async (p: string, body: Record<string, unknown>) => onPost(p, body),
+      get: async (p: string) => onGet?.(p) ?? { status: 200, data: { safe: true } },
+    }) as never };
+  }
+  let dir: string;
+  const accountsFile = (accounts: Record<string, unknown> = { golisano: { dir: "/home/u/.claude-fleet", label: "Golisano Enterprise", token: "must-not-leak" }, pro: { dir: "/home/u/.claude-pro" } }) => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "provider-claude-accounts-"));
+    const file = path.join(dir, "claude-accounts.json");
+    fs.writeFileSync(file, JSON.stringify({ schema: "claude-accounts.v2", accounts }));
+    return file;
+  };
+  const savedEnv = process.env.OPENRIG_CLAUDE_ACCOUNTS_FILE;
+  const restore = () => { if (savedEnv === undefined) delete process.env.OPENRIG_CLAUDE_ACCOUNTS_FILE; else process.env.OPENRIG_CLAUDE_ACCOUNTS_FILE = savedEnv; if (dir) fs.rmSync(dir, { recursive: true, force: true }); };
+
+  it("--config-dir POSTs the dir (label defaults to its name), no token fields, and prints the dir, the conversation and the way back", async () => {
+    const posted: Array<Record<string, unknown>> = [];
+    const { logs, exitCode } = await run(["switch", "--seat", "s1", "--config-dir", "/home/u/.claude-fleet/"], deps((_p, body) => { posted.push(body); return ok; }));
+    expect(posted).toEqual([{ seat: "s1", toAccount: ".claude-fleet", configDir: "/home/u/.claude-fleet", forceUnsafe: false }]);
+    expect(exitCode).toBeUndefined();
+    expect(logs).toContain('Claude config dir: /home/u/.claude-fleet ("golisano") (set)');
+    expect(logs).toContain("conversation: conv-1");
+    expect(logs).toContain("to switch back: rig provider switch --seat s1 --config-dir '/home/u/.claude-pro'");
+    expect(logs).toContain("next: check /status");
+  });
+
+  it("--to-account names a declared account by key or label through --accounts-file, and only the dir and key reach the daemon", async () => {
+    try {
+      const file = accountsFile();
+      for (const name of ["golisano", "Golisano Enterprise"]) {
+        const posted: Array<Record<string, unknown>> = [];
+        await run(["switch", "--seat", "s1", "--to-account", name, "--accounts-file", file], deps((_p, body) => { posted.push(body); return ok; }));
+        expect(posted).toEqual([{ seat: "s1", toAccount: "golisano", configDir: "/home/u/.claude-fleet", forceUnsafe: false }]);
+        expect(JSON.stringify(posted)).not.toContain("must-not-leak");
+      }
+    } finally { restore(); }
+  });
+
+  it("the accounts file can come from OPENRIG_CLAUDE_ACCOUNTS_FILE, and a label it doesn't declare passes through unchanged (a Codex login name)", async () => {
+    try {
+      process.env.OPENRIG_CLAUDE_ACCOUNTS_FILE = accountsFile();
+      const posted: Array<Record<string, unknown>> = [];
+      await run(["switch", "--seat", "s1", "--to-account", "pro"], deps((_p, body) => { posted.push(body); return ok; }));
+      await run(["switch", "--seat", "s1", "--to-account", "cdx-b"], deps((_p, body) => { posted.push(body); return ok; }));
+      expect(posted).toEqual([
+        { seat: "s1", toAccount: "pro", configDir: "/home/u/.claude-pro", forceUnsafe: false },
+        { seat: "s1", toAccount: "cdx-b", forceUnsafe: false },
+      ]);
+    } finally { restore(); }
+  });
+
+  it("a token file keeps the token move even when the label is declared, and --stored-login is unchanged", async () => {
+    try {
+      process.env.OPENRIG_CLAUDE_ACCOUNTS_FILE = accountsFile();
+      const posted: Array<Record<string, unknown>> = [];
+      await run(["switch", "--seat", "s1", "--to-account", "pro", "--token-file", "/secrets/pro.token"], deps((_p, body) => { posted.push(body); return ok; }));
+      await run(["switch", "--seat", "s1", "--stored-login"], deps((_p, body) => { posted.push(body); return ok; }));
+      expect(posted).toEqual([
+        { seat: "s1", toAccount: "pro", tokenFile: "/secrets/pro.token", forceUnsafe: false },
+        { seat: "s1", toAccount: "stored-login", tokenFile: null, forceUnsafe: false },
+      ]);
+    } finally { restore(); }
+  });
+
+  it("refuses contradictory or unusable options before contacting the daemon", async () => {
+    let posts = 0;
+    const counting = deps(() => { posts++; return ok; });
+    for (const args of [
+      ["--config-dir", "/a", "--token-file", "/secrets/x.token"],
+      ["--config-dir", "/a", "--stored-login"],
+      ["--config-dir", "relative/dir"],
+      ["--to-account", "golisano", "--accounts-file", "/nonexistent/accounts.json"],
+    ]) {
+      const { logs, exitCode } = await run(["switch", "--seat", "s1", ...args], counting);
+      expect(exitCode).toBe(1);
+      expect(logs.join("\n")).toMatch(/--config-dir|accounts file/);
+    }
+    expect(posts).toBe(0);
+  });
+
+  it("precheck sends the config dir and prints what was checked", async () => {
+    let url = "";
+    const { logs, exitCode } = await run(["precheck", "--seat", "s1", "--config-dir", "/home/u/.claude-fleet"], deps(undefined, (p) => {
+      url = p;
+      return { status: 200, data: { safe: true, claude: { label: ".claude-fleet", tokenFile: null, configDir: "/home/u/.claude-fleet", checked: ["the launch environment"], notChecked: ["managed settings"] } } };
+    }));
+    expect(url).toContain("configDir=%2Fhome%2Fu%2F.claude-fleet");
+    expect(url).not.toContain("tokenFile");
+    expect(exitCode).toBeUndefined();
+    expect(logs).toContain("SAFE");
+    expect(logs).toContain('Claude config dir: /home/u/.claude-fleet (".claude-fleet")');
+    expect(logs.join("\n")).toContain("checked for anything that outranks it: the launch environment");
   });
 });

@@ -152,7 +152,7 @@ export class ClaudeManagedLaunch {
    *  shell's own exports can't outrank it. With `storedLogin`, also a `CLAUDE_CODE_OAUTH_TOKEN` it would receive, which Claude
    *  uses ahead of the stored login; a pane shell's own exports can't be read then. Managed settings (a file, MDM or the
    *  server) aren't read; the restarted seat's /status is the evidence for those. */
-  async credentialPrecedence(nodeId: string, opts: { storedLogin?: boolean } = {}): Promise<CredentialPrecedence> {
+  async credentialPrecedence(nodeId: string, opts: { storedLogin?: boolean; configDir?: string } = {}): Promise<CredentialPrecedence> {
     const target = this.target(nodeId);
     const cwd = target.cwd!;
     const conflicts: CredentialConflict[] = [];
@@ -177,7 +177,8 @@ export class ClaudeManagedLaunch {
       ...(opts.storedLogin ? ["the pane shell's own exports (its startup files), which a launch without an explicit permission mode keeps"] : [])];
     const root = projectRootForLocalSettings(cwd);
     const files: Array<[string, string]> = [
-      [path.join(this.configPaths(cwd, nodeId).configDir, "settings.json"), "user"],
+      // A move to another account's config dir reads that dir's user settings: it is the one the seat's next launch loads.
+      [path.join(opts.configDir ?? this.configPaths(cwd, nodeId).configDir, "settings.json"), "user"],
       [path.join(cwd, ".claude", "settings.json"), "project"],
       [path.join(root ?? cwd, ".claude", "settings.local.json"), "project local"],
       // Claude Code also reads a local file an earlier version left in the starting directory.
