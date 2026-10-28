@@ -148,9 +148,47 @@ export function resolveCurrentSessionAddress(db: Database.Database, address: str
  * use savedSessionName instead so reconnecting does not redirect saved context. */
 export function physicalSessionName(db: Database.Database, address: string): string {
   if (!address.includes("@")) return address;
+  // Inside a transaction the state may still be rolled back, and total_changes() does not go back with it: no cache.
+  if (db.inTransaction) return resolvePhysicalSessionName(db, address);
+  const cache = physicalNameCache(db);
+  if (!cache) return resolvePhysicalSessionName(db, address);   // no usable change token: resolve, never cache
+  const known = cache.names.get(address);
+  if (known !== undefined) return known;
+  const name = resolvePhysicalSessionName(db, address);
+  cache.names.set(address, name);
+  return name;
+}
+
+function resolvePhysicalSessionName(db: Database.Database, address: string): string {
   // A curated/legacy read model with no binding table has no aliases to resolve.
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='bindings'").get()) return address;
   return resolveCurrentSessionAddress(db, address)?.sessionName ?? address;
+}
+
+interface PhysicalNameCache { token: string; names: Map<string, string> }
+const physicalNameCaches = new WeakMap<Database.Database, { cache: PhysicalNameCache; changes: Database.Statement }>();
+
+/** Resolving an address joins every node (the derived team address is an expression, so no index serves it), and an
+ * inventory read resolves one address per node from several places: ~100 statements per GET /nodes (P23). The answer
+ * is a pure function of the database, so it is kept per connection and dropped whenever the database changes: the token
+ * is this connection's own change count plus SQLite's data_version, which moves when any OTHER connection commits.
+ * Not used inside a transaction (see physicalSessionName). */
+function physicalNameCache(db: Database.Database): PhysicalNameCache | null {
+  try {
+    let entry = physicalNameCaches.get(db);
+    if (!entry) {
+      entry = { cache: { token: "", names: new Map() }, changes: db.prepare("SELECT total_changes() AS n") };
+      physicalNameCaches.set(db, entry);
+    }
+    const token = `${db.pragma("data_version", { simple: true })}:${(entry.changes.get() as { n: number }).n}`;
+    if (entry.cache.token !== token) entry.cache = { token, names: new Map() };
+    return entry.cache;
+  } catch (err) {
+    // A connection that cannot report its change token (a test double, a read model handle) cannot be cached safely.
+    // Resolving without the cache is always correct, so say nothing more than why.
+    if (!(err instanceof TypeError)) throw err;
+    return null;
+  }
 }
 
 /** Only this predecessor may be omitted when selecting a same-seat successor.
