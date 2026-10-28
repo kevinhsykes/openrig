@@ -1882,17 +1882,33 @@ describe("rig queue CLI", () => {
       expect(process.exitCode).not.toBe(1);
     });
 
-    it("show default --json: carries preview + bodyBytes + bodyTruncated (JSON parity)", async () => {
+    it("show default --json: carries preview + bodyBytes + bodyTruncated, and the bounded-preview note goes to STDERR so the cut is impossible to miss", async () => {
       const full = "B".repeat(1000);
       const { deps } = showRoute({ qitemId: "qitem-1", body: full });
       const program = createProgram({ queueDeps: deps });
       program.exitOverride();
       await program.parseAsync(["node", "rig", "queue", "show", "qitem-1", "--json"]);
-      expect(logs.length).toBe(1); // compact single-line JSON, no separate marker line
+      expect(logs.length).toBe(1); // stdout stays ONE compact JSON document (the note is stderr-only)
       const printed = JSON.parse(logs[0]);
       expect(printed.bodyTruncated).toBe(true);
       expect(printed.bodyBytes).toBe(1000);
       expect(Array.from(printed.body).length).toBe(PREVIEW_MAX_CODEPOINTS);
+      // Same one-line note as text mode, on stderr, with the honest sizes and the full command:
+      expect(errors.join("\n")).toContain("bounded preview — complete body is 1000 bytes; full record");
+      expect(errors.join("\n")).toContain("rig queue show 'qitem-1' --full --json");
+      expect(process.exitCode).not.toBe(1); // a note, not a failure
+    });
+
+    it("show --json: small body → full body, bodyTruncated=false, NO stderr note, exit 0", async () => {
+      const { deps } = showRoute({ qitemId: "qitem-1", body: "short body" });
+      const program = createProgram({ queueDeps: deps });
+      program.exitOverride();
+      await program.parseAsync(["node", "rig", "queue", "show", "qitem-1", "--json"]);
+      const printed = JSON.parse(logs[0]);
+      expect(printed.body).toBe("short body");
+      expect(printed.bodyTruncated).toBe(false);
+      expect(errors.join("\n")).not.toContain("bounded preview");
+      expect(process.exitCode).not.toBe(1);
     });
 
     it("show --full --json: byte-identical COMPLETE item body (compatibility contract — no preview fields)", async () => {
@@ -1903,6 +1919,8 @@ describe("rig queue CLI", () => {
       await program.parseAsync(["node", "rig", "queue", "show", "qitem-1", "--full", "--json"]);
       // Byte-identical to a raw JSON.stringify of the item (today's shape).
       expect(logs[0]).toBe(JSON.stringify(item));
+      // --full is a passthrough: no preview, and no bounded-preview note on stderr either.
+      expect(errors.join("\n")).not.toContain("bounded preview");
       const printed = JSON.parse(logs[0]);
       expect(printed.body).toBe("C".repeat(1000)); // complete, untruncated
       expect(printed).not.toHaveProperty("bodyBytes");
