@@ -747,3 +747,60 @@ describe("round 4: the identity keys the label reads, from either provider", () 
     expect((await view(hub)).body.hosts.find((h) => h.hostId === "extra")).toMatchObject({ usage: "served" });
   });
 });
+
+describe("P4 fix B: a remote host's quota-collector rail row crosses the HTTP boundary", () => {
+  type Body = Record<string, unknown>;
+  const zaiRow = (patch: (r: Body) => Body = (r) => r): Body => patch({
+    ...codexRow("x", null),
+    provider: "zai",
+    identity: { provider: "zai", rail: "zai", window: "5h", source: "quota-collector/glm", recordState: "AVAILABLE", unknown: null },
+    source: { kind: "quota_collector_file", host: "local" },
+  } as unknown as Body);
+  // The remote's own native rows stay; one collector row is added to what the real route served.
+  const withRow = (row: Body) => (p: string, b: unknown) =>
+    p === "/api/provider/status" ? { ...(b as Body), usage: [...(b as { usage: Body[] }).usage, row] } : b;
+  const MISFORMED = "this host served usage rows in a shape this daemon doesn't recognize";
+
+  it("a valid remote zai collector row is served and kept as that host's observation, beside its native rows", async () => {
+    const rail = await host("rail", { rewrite: withRow(zaiRow()) });
+    await refreshDirect(rail, "codex");
+    const hub = await host("hub", { registry: [rail.entry()] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    expect(body.hosts.find((h) => h.hostId === "rail")).toMatchObject({ usage: "served" });
+    const zai = body.items.filter((g) => g.provider === "zai").flatMap((g) => g.observations);
+    expect(zai.map((o) => [o.hostId, o.row.source.kind])).toEqual([["rail", "quota_collector_file"]]);
+    // A collector row proves rail use, not an account: it links to nothing on another host (BR-4).
+    expect(body.items.filter((g) => g.provider === "zai").every((g) => g.linkage !== "same")).toBe(true);
+    expect(body.items.some((g) => g.provider === "codex" && g.observations.some((o) => o.hostId === "rail"))).toBe(true);
+  });
+
+  const BAD: Array<[string, (r: Body) => Body]> = [
+    ["a window that isn't text", (r) => ({ ...r, identity: { ...(r["identity"] as Body), window: 5 } })],
+    ["no rail in the identity", (r) => ({ ...r, identity: { provider: "zai", window: "5h", source: "s", recordState: null, unknown: null } })],
+    ["an unprintable record state", (r) => ({ ...r, identity: { ...(r["identity"] as Body), recordState: { toString: 1, valueOf: 1 } } })],
+    ["an unknown marker without a kind", (r) => ({ ...r, identity: { ...(r["identity"] as Body), unknown: { reason: "x" } } })],
+    ["an identity naming another rail than the row", (r) => ({ ...r, identity: { ...(r["identity"] as Body), rail: "minimax" } })],
+    ["a provider that isn't a rail id", (r) => ({ ...r, provider: "Bad Rail", identity: { ...(r["identity"] as Body), rail: "Bad Rail" } })],
+    ["a non-built-in provider from a native source", (r) => ({ ...r, source: { kind: "codex_app_server", host: "local" } })],
+    ["a null identity on a collector row", (r) => ({ ...r, identity: null })],
+    ["a malformed window", (r) => ({ ...r, windows: [null] })],
+  ];
+
+  it("a malformed collector row still makes that host unavailable, with the reason; this host and a healthy one are served", async () => {
+    const good = await host("good", { rewrite: withRow(zaiRow()) });
+    const bad = await Promise.all(BAD.map(([id, patch]) => host(id.replace(/\W+/g, "-"), { rewrite: withRow(zaiRow(patch)) })));
+    const hub = await host("hub", { registry: [good.entry(), ...bad.map((h) => h.entry())] });
+    const { status, body } = await view(hub);
+    expect(status).toBe(200);
+    expect(body.hosts.map((h) => [h.hostId, h.usage, h.usageReason ?? null])).toEqual([
+      ["local", "served", null], ["good", "served", null],
+      ...bad.map((h) => [h.id, "unavailable", MISFORMED]),
+    ]);
+  });
+
+  it("isUsageRow accepts a collector row and refuses the same row with a broken identity", () => {
+    expect(isUsageRow(zaiRow())).toBe(true);
+    expect(isUsageRow(zaiRow((r) => ({ ...r, identity: { ...(r["identity"] as Body), window: 5 } })))).toBe(false);
+  });
+});

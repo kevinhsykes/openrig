@@ -26,7 +26,7 @@ import type {
   CollectorQuotaIdentity,
   UsageAllowanceIdentity,
 } from "./provider-types.js";
-import { isKnownProviderKind, KNOWN_PROVIDER_KINDS_LABEL, type KnownProviderKind } from "./provider-types.js";
+import { isKnownProviderKind, isProviderRailId, KNOWN_PROVIDER_KINDS_LABEL, type KnownProviderKind } from "./provider-types.js";
 import { USAGE_CLOCK_TOLERANCE_MS } from "./usage-windows.js";
 
 /** Reading a host's served model is an ordinary read: the same 5 s class as the read-through and the feed. */
@@ -346,8 +346,31 @@ const usageRowFields = {
   savedProfile: optional(oneOf("not linked")),
 };
 
+/** A collector rail row's identity (CollectorQuotaIdentity): the file's window, who wrote it, and why a window is unknown. */
+const collectorIdentity = record({
+  provider: str,
+  rail: str,
+  window: str,
+  source: str,
+  recordState: nullable(str),
+  unknown: nullable(record({ kind: str, reason: nullable(str) })),
+});
+
+/** A quota-collector rail row from a remote host (provider is the rail id, e.g. zai). The rail need not be registered here: a host
+ *  can meter a rail this daemon doesn't, and refusing it would drop that host's native rows with it. What must hold is that the
+ *  row says it came from the collector file and its identity is the collector's shape, naming the row's own rail. */
+function isCollectorUsageRow(v: Record<string, unknown>): boolean {
+  const source = v["source"];
+  const identity = v["identity"];
+  return isProviderRailId(v["provider"])
+    && isRecord(source) && source["kind"] === "quota_collector_file"
+    && collectorIdentity(identity) && (identity as Record<string, unknown>)["rail"] === v["provider"]
+    && record(usageRowFields)(v);
+}
+
 /** A served row with every field the grouping and the views read, typed as provider-types.ts says. */
 export function isUsageRow(v: unknown): v is ProviderUsageAllowance {
+  if (isRecord(v) && v["provider"] !== "codex" && v["provider"] !== "claude") return isCollectorUsageRow(v);
   if (!isRecord(v) || (v["provider"] !== "codex" && v["provider"] !== "claude")) return false;
   const identity = v["provider"] === "codex" ? codexIdentity : claudeIdentity;
   return nullable((id) => identity(id) && anyIdentityKeys(id))(v["identity"]) && record(usageRowFields)(v);

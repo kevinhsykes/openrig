@@ -460,6 +460,18 @@ describe("through the service and routes", () => {
     expect(String((await hostsNonString.json()).error)).toContain("(got 42)");
   });
 
+  it("the 409 for a switched-off refresh names the real provider, not Claude", async () => {
+    registerProviderKinds(["zai"]);
+    const off = await app(service(false)).request("/api/provider/usage/refresh", { method: "POST", body: JSON.stringify({ provider: "zai" }) });
+    expect(off.status).toBe(409);
+    expect((await off.json()).message).toBe("zai usage windows are off. Turn them on with: rig config set provider.usage_windows true");
+    for (const [provider, label] of [["codex", "Codex"], ["claude", "Claude"]] as const) {
+      const res = await app(service(false)).request("/api/provider/usage/refresh", { method: "POST", body: JSON.stringify({ provider }) });
+      expect(res.status).toBe(409);
+      expect((await res.json()).message).toBe(`${label} usage windows are off. Turn them on with: rig config set provider.usage_windows true`);
+    }
+  });
+
   it("a cross-host refresh of a collector rail refreshes this host's feed, and each remote host's leg is a NAMED failure before any request", async () => {
     registerProviderKinds(["zai"]);
     const fetchImpl = vi.fn(async () => { throw new Error("no network in this test"); });

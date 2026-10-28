@@ -173,7 +173,7 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     if ("disabled" in result) {
       return c.json({
         error: "usage_windows_disabled",
-        message: `${provider === "codex" ? "Codex" : "Claude"} usage windows are off. Turn them on with: rig config set provider.usage_windows true`,
+        message: `${provider === "codex" ? "Codex" : provider === "claude" ? "Claude" : provider} usage windows are off. Turn them on with: rig config set provider.usage_windows true`,
       }, 409);
     }
     if ("unavailable" in result) return c.json({ error: `${provider} usage windows are not available on this daemon` }, 400);
