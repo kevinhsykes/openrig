@@ -2,7 +2,7 @@
 # "pi" itself is the built-in managed Pi runtime, so this preset for Pi's own terminal UI takes another name.
 format: 1
 name: pi-tui
-command: openrig-pi-tui-launch    # no model or provider here: they go in the seat's Pi settings or environment
+command: openrig-pi-tui-launch    # the seat's model and effort arrive as OPENRIG_MODEL / OPENRIG_EFFORT; the provider key goes in the seat's Pi settings or environment
 maintainer: Your name or team
 limits:
   - checked once with Pi 1.4.0 and OpenRig 0.7.4 (one run, one model); other Pi versions aren't checked
@@ -11,5 +11,6 @@ limits:
   - a send while a Pi dialog OpenRig doesn't recognize is open, such as /settings, types into the dialog
   - how Pi takes a wake that arrives while it's busy isn't shown
   - only the listed openrig-core skills are copied into the seat's Pi agent folder; no guidance or startup files are placed
+  - the relaunch loop and the model, thinking and --no-approve flags are checked against a stand-in pi and, for the pane's foreground command, a real tmux; no real Pi has run them
 names_conversation: true
 first_input: true

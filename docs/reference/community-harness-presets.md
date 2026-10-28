@@ -227,6 +227,15 @@ on it, not Pi choosing by itself to park or hand work on.
   `PI_CODING_AGENT_DIR` is set) and its own session folder. At each launch it copies the installed `openrig-core` skills
   it's given (`queue-handoff` by default) into that agent folder. A new launch starts `pi --session-id <the name OpenRig
   gave>` and passes the first input as Pi's first prompt, byte for byte.
+- **Model, thinking and trust:** the member's `model` reaches the launcher as `OPENRIG_MODEL` and becomes `--model`; its `effort`
+  becomes `--thinking` when it's one of Pi's levels (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`), and any other
+  effort is named on stderr and left out. `--no-approve` is always passed, so Pi doesn't stop at its "trust this project folder?"
+  dialog.
+- **Kept up:** when Pi exits, the launcher starts it again on the same session (the one file whose header has the name, else the
+  same name again), after a back-off that doubles from 2 s to 60 s. A start that ran for 60 s resets the count; after more than 5
+  quick exits in a row the launcher says so on stderr and exits 1, and the seat's pane is then at a shell, which OpenRig reports as
+  not running. In a terminal it turns on job control: a plain loop shows `sh` as the pane's foreground command while Pi runs, so
+  OpenRig would read the seat as sitting at a shell. `OPENRIG_PI_RELAUNCH=0` runs Pi once.
 - **Resume isn't declared.** The launcher can reopen a named session: it opens the one session file whose header has that
   id, and starts nothing when there isn't exactly one, because Pi's own `--session-id` creates a session for an id it
   doesn't find. Declare `resume: true` only after a real Pi has reopened a named session and refused a missing one.
@@ -322,6 +331,8 @@ Start from the example closest to your harness, and change it. First check that 
    - **On a resume,** `OPENRIG_RESUME_REF`: reopen exactly that conversation. Check that it exists first, and when it doesn't, end with an
      error (or report `error: "missing"`) instead of creating one.
    - **With `first_input: true`,** `OPENRIG_FIRST_INPUT`: pass the file's exact bytes through your harness's own first-prompt route.
+   - **The seat's model and effort,** `OPENRIG_MODEL` and `OPENRIG_EFFORT`, when the member declares them (each only when set): pass them to
+     your harness's own model and effort options. A launcher that doesn't read them ignores them.
    - **Keep each seat's harness state apart** (Cursor's config folder, Hermes's home, OpenClaw's state folder), so two seats never share a
      conversation.
 3. **Write the preset** at `$OPENRIG_HOME/community-harnesses/<name>.yaml`, and check it with `rig community-harness list`.

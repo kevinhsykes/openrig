@@ -39,7 +39,8 @@ interface CommunityHarnessAdapterDeps {
  * preset that declares `resume`. With `launch_result`, its launcher is told the conversation to reopen and reports what it
  * did, and a conversation it says is gone is never replaced by a new one. With `names_conversation`, OpenRig names each new
  * conversation and passes the saved name back on a resume. Nothing reports back, so a named seat's readiness is
- * process-only: its saved name is unverified until something observes it.
+ * process-only: its saved name is unverified until something observes it. The seat's model and effort, when it has them,
+ * go to the launcher as OPENRIG_MODEL and OPENRIG_EFFORT.
  */
 export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
   constructor(readonly runtime: string, private readonly deps: CommunityHarnessAdapterDeps) {}
@@ -98,7 +99,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       : `/usr/bin/env -u OPENRIG_FIRST_INPUT ${found.preset.command}` } : found.preset;
     let passed = false;
     try {
-      const result = await this.launchPreset(session, preset, resumeRef, firstInput ? () => { passed = true; } : undefined);
+      const result = await this.launchPreset(session, preset, resumeRef, seatSettings(binding), firstInput ? () => { passed = true; } : undefined);
       return { ...result, ...(passed ? { firstInput } : {}) };
     } catch (error) {
       if (!passed) throw error;
@@ -106,8 +107,8 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     }
   }
 
-  private async launchPreset(session: string, preset: CommunityHarnessPreset, resumeRef: string | undefined, beforeInput?: () => void): Promise<HarnessLaunchResult> {
-    if (preset.namesConversation) return this.launchNamed(session, preset.command, resumeRef, beforeInput);
+  private async launchPreset(session: string, preset: CommunityHarnessPreset, resumeRef: string | undefined, settings: string, beforeInput?: () => void): Promise<HarnessLaunchResult> {
+    if (preset.namesConversation) return this.launchNamed(session, preset.command, resumeRef, settings, beforeInput);
     let attempt: LaunchAttempt | undefined;
     let program = preset.command;
     // The record is optional: a folder that can't be made leaves the identity unavailable, and the harness still launches.
@@ -116,7 +117,7 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
       try {
         attempt = newLaunchAttempt(session, this.deps.launchResultRoot?.() ?? launchResultRoot());
         program = `/usr/bin/env OPENRIG_LAUNCH_RESULT=${shellQuote(attempt.file)} OPENRIG_LAUNCH_ATTEMPT=${attempt.attempt}`
-          + `${resumeRef ? ` OPENRIG_RESUME_REF=${shellQuote(resumeRef)}` : ""} ${program}`;
+          + `${resumeRef ? ` OPENRIG_RESUME_REF=${shellQuote(resumeRef)}` : ""}${settings} ${program}`;
       } catch (error) {
         // A resume needs its record: without it the launcher can't be told what to reopen, so nothing starts.
         if (resumeRef) {
@@ -156,9 +157,9 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
    *  in OPENRIG_RESUME_REF. Nothing reports back, so the name is recorded as passed, not observed, and readiness says only
    *  that a process runs: a harness that hasn't yet found a gone conversation reads as ready. Never creating one on a
    *  resume is the launcher's job; OpenRig never asks for a new conversation on a resume. */
-  private async launchNamed(session: string, preset: string, resumeRef: string | undefined, beforeInput?: () => void): Promise<HarnessLaunchResult> {
+  private async launchNamed(session: string, preset: string, resumeRef: string | undefined, settings: string, beforeInput?: () => void): Promise<HarnessLaunchResult> {
     const name = resumeRef ?? conversationName(session);
-    const program = `/usr/bin/env ${resumeRef ? "OPENRIG_RESUME_REF" : "OPENRIG_CONVERSATION"}=${shellQuote(name)} ${preset}`;
+    const program = `/usr/bin/env ${resumeRef ? "OPENRIG_RESUME_REF" : "OPENRIG_CONVERSATION"}=${shellQuote(name)}${settings} ${preset}`;
     const command = this.deps.seatLaunchEnvironment
       ? await this.deps.seatLaunchEnvironment.command(session, program, { runtime: this.runtime })
       : program;
@@ -190,6 +191,14 @@ export class CommunityHarnessRuntimeAdapter implements RuntimeAdapter {
     const found = loadCommunityHarnessPreset(this.runtime, this.deps.presetsDir?.() ?? communityHarnessesDir());
     return found.ok && found.preset.startupAssisted;
   }
+}
+
+/** The seat's model and effort as env assignments for the launcher (each with a leading space), only for what the seat has.
+ *  A harness that doesn't read them ignores them; Pi's example launcher turns them into --model and --thinking. */
+function seatSettings(binding: NodeBinding): string {
+  const model = binding.model?.trim();
+  const effort = binding.effort?.trim();
+  return `${model ? ` OPENRIG_MODEL=${shellQuote(model)}` : ""}${effort ? ` OPENRIG_EFFORT=${shellQuote(effort)}` : ""}`;
 }
 
 /** A new conversation's name: the seat's session name, made safe, and 8 random hex digits, at most 100 characters. */
