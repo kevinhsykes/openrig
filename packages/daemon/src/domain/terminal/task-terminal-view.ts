@@ -1,6 +1,7 @@
 import type Database from "better-sqlite3";
 import { hasOtherSeatHistory } from "../session-registry.js";
 import type { ViewMemberInput } from "./view-composer.js";
+import { terminalAgentHint } from "./terminal-agent-hint.js";
 
 export interface TaskObligation { qitemId: string; state: string }
 export interface TaskTerminalMember {
@@ -180,8 +181,9 @@ function readTaskTerminalSnapshot(
       : availability === "missing" ? "No tmux session is recorded for this seat." : undefined;
     owners.set(id, { key: { hostId: seat?.hostId ?? null, nodeId: seat?.nodeId ?? null }, seat: seat?.seat ?? address,
       obligations: [{ qitemId: row.qitem_id, state: row.state }], availability, ...(reason ? { reason } : {}), viewerStatus: "not-provisioned" });
+    const agent = seat ? terminalAgentHint(db, seat.nodeId, seat.runtime) : null;
     if (availability === "available" && seat) inputs.set(id, {
-      seat: seat.seat, label: seat.seat, ...(seat.runtime ? { runtime: seat.runtime } : {}),
+      seat: seat.seat, label: seat.seat, ...(seat.runtime ? { runtime: seat.runtime } : {}), ...(agent ? { agent } : {}),
       tmuxSession: seat.tmuxSession, host: null, alive: true,
       // A task can span rigs. Membership is not authority to type; retain the
       // existing derived-scope read-only policy, independent of owner ensure.

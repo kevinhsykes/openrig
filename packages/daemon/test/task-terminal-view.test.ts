@@ -110,6 +110,21 @@ describe("task terminal membership", () => {
     expect(result.task.members).toHaveLength(1); expect(result.members).toHaveLength(1);
     expect(result.task.members[0]!.obligations).toHaveLength(2);
   });
+  it("carries the Pi hint of a terminal seat whose persisted startup launches pi, and no other", () => {
+    const { db, add, seat } = fixture(); add("qitem-root"); add("qitem-pi", "pi@team", "pending", "qitem-root");
+    add("qitem-sh", "sh@team", "pending", "qitem-root"); add("qitem-cc", "cc@team", "pending", "qitem-root");
+    db.exec("CREATE TABLE node_startup_context (node_id TEXT PRIMARY KEY, startup_actions_json TEXT NOT NULL, runtime TEXT NOT NULL)");
+    const launch = (value: string) => JSON.stringify([{ type: "send_text", value, phase: "after_ready" }]);
+    const put = db.prepare("INSERT INTO node_startup_context VALUES (?,?,?)");
+    put.run("pi", launch("env HOME=/h pi --no-approve --continue"), "terminal");
+    put.run("sh", launch("htop"), "terminal");
+    put.run("cc", launch("env HOME=/h pi"), "claude-code"); // the runtime already says what this seat is
+    const result = readTaskTerminalView(db, "qitem-root", address => ({ ...seat(address)!, runtime: address.startsWith("cc") ? "claude-code" : "terminal" }))!;
+    const by = Object.fromEntries(result.members.map(m => [m.seat, m]));
+    expect(by["pi@team"]).toMatchObject({ runtime: "terminal", agent: "pi" });
+    expect(by["sh@team"]!.agent).toBeUndefined();
+    expect(by["cc@team"]!.agent).toBeUndefined();
+  });
   it("retains same-named nodes on different hosts and distinct unresolved destinations", () => {
     const { db, add, seat } = fixture(); add("qitem-root"); add("qitem-foreign", "a@remote", "pending", "qitem-root");
     const result = readTaskTerminalView(db, "qitem-root", address => ({ ...seat("a@team")!, hostId: address === "a@remote" ? "other" : "box" }))!;

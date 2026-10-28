@@ -45,6 +45,8 @@ export interface ViewMemberInput {
   seat: string;
   /** Runtime recorded for a live seat; absent for saved members without inventory data. */
   runtime?: string | null;
+  /** Agent a `terminal` seat's startup launches (see `terminalAgentHint`); absent when unknown. */
+  agent?: "pi" | null;
   /** Pane label — `<agent> · <slice>` (AC-7). */
   label: string;
   /** The tmux session to attach to (may be null if the seat has no tmux binding). */
@@ -171,6 +173,7 @@ export function composeView(
       opened.push({
         seat: m.seat,
         ...(m.runtime ? { runtime: m.runtime } : {}),
+        ...(m.agent ? { agent: m.agent } : {}),
         label: m.label,
         paneCommand: `ssh ${shellQuote(dest)} ${shellQuote(remoteCommand)}`,
         recoveryCommand: `ssh ${shellQuote(dest)} ${shellQuote(`tmux attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`)}`,
@@ -200,6 +203,7 @@ export function composeView(
     opened.push({
       seat: m.seat,
       ...(m.runtime ? { runtime: m.runtime } : {}),
+      ...(m.agent ? { agent: m.agent } : {}),
       label: m.label,
       paneCommand: attachArgv.map(shellQuote).join(" "),
       recoveryCommand: `${localTmux} attach ${attachFlag}-t ${shellQuote(m.tmuxSession)}`,

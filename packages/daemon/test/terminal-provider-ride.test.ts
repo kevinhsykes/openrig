@@ -220,6 +220,29 @@ describe("view-composer partition vectors", () => {
     ]);
     expect(panes.at(-1)?.command).toEqual(["sh"]);
   });
+
+  it("gives the Pi hint to a terminal seat whose startup launches pi, and to nothing else", () => {
+    const members = deriveViewMembers([
+      { canonicalSessionName: "chat@rig", attachmentType: "tmux", runtime: "terminal", agent: "pi" },
+      { canonicalSessionName: "shell@rig", attachmentType: "tmux", runtime: "terminal" },
+      { canonicalSessionName: "claude@rig", attachmentType: "tmux", runtime: "claude-code", agent: "pi" },
+    ]);
+    const view = composeView("rig:rig", members, ctxWith([]));
+    const grid = buildGridRoot(view.opened).root;
+    const panes: HerdrPaneNode[] = [];
+    const collect = (node: HerdrLayoutNode) => {
+      if (node.type === "pane") panes.push(node);
+      else { collect(node.first); collect(node.second); }
+    };
+    collect(grid);
+
+    expect(panes.filter((pane) => pane.label).map((pane) => pane.command)).toEqual([
+      ["sh", "-c", `env HERDR_AGENT=pi ${tileAttachArgv("tmux", [], "chat@rig", false).map(shellQuote).join(" ")}`],
+      ["sh", "-c", tileAttachArgv("tmux", [], "shell@rig", false).map(shellQuote).join(" ")],
+      // The runtime Herdr already recognises wins; the startup hint only fills the gap.
+      ["sh", "-c", `env HERDR_AGENT=claude ${tileAttachArgv("tmux", [], "claude@rig", false).map(shellQuote).join(" ")}`],
+    ]);
+  });
 });
 
 describe("terminal-views store — round-trip byte-stable + atomic write + A3", () => {
