@@ -3236,9 +3236,16 @@ export class SessionTransport {
       if (writeIssued && error && typeof error === "object") (error as { inputAttempted?: boolean }).inputAttempted = true;
       throw error;
     };
+    // P27c: the entry check above ran before the readiness wait, the capture and the copy-mode read. The foreground can change in
+    // that time (pi exits, `rig tui` starts), so the positive pane check is repeated as the LAST step before the text is handed to
+    // tmux: it is the first statement of the stage callback and the typing call follows it with no await between them. The check
+    // is synchronous to a null for every seat it does not apply to, so those sends gain no tmux read.
+    let finalHold: SendResult | null = null;
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => {
+      async () => {
+        const hold = this.terminalAgentNotRunning(sessionName, opts);
+        if (hold) { finalHold = await hold; if (finalHold) return { ok: false as const, code: "terminal_final_hold", message: "held" } as never; }
         opts?.beforeWrite?.();
         writeIssued = true;
         if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false, beforePaste: overrideBeforePaste });
@@ -3246,6 +3253,7 @@ export class SessionTransport {
       },
       (result) => result.ok ? "ok" : "failed",
     ).catch(tagIssued);
+    if (finalHold) return observe({ ...(finalHold as SendResult), inputPhase: "not_reached" as const, ...(waitMode ? { sent: false, ...waitEvidence } : {}) });
     if (!textResult.ok && textResult.code === CALLER_CANCELLED && cancel?.aborted) {
       return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     }

@@ -2924,6 +2924,29 @@ describe("SessionTransport", () => {
     expect(sent).toEqual([]);
   });
 
+  // P27c (OpenAI review of 41c2b2d0a): the entry check passes, the foreground then flips pi -> node while the send waits
+  // (readiness / capture / copy-mode reads), and the check must be repeated right before the text is handed to tmux.
+  it.each([["send", false], ["sendUnguarded", true]])("P27c: pi at entry, node by the time of typing (%s): nothing typed, held by name", async (_n, direct) => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    let live = "pi";
+    const tmux = mockTmux({
+      getPaneCommand: async () => live,
+      // every read other than the pane command is part of the wait before typing: the foreground flips during it
+      capturePaneContent: async () => { live = "node"; return "> "; },
+      isPaneInMode: async () => { live = "node"; return false; },
+      sendText: async (_t, text) => { sent.push(text); return { ok: true }; },
+    } as never);
+    const t = createTransport(tmux);
+    const result = direct
+      ? await (t as unknown as { sendUnguarded(s: string, x: string, o?: object): Promise<{ ok: boolean; reason?: string }> }).sendUnguarded("infra-ui@term-rig", H_ENVELOPE, {})
+      : await t.send("infra-ui@term-rig", H_ENVELOPE, {});
+    expect(live).toBe("node");   // the flip really happened during the send, or this test proves nothing
+    expect(result).toMatchObject({ ok: false, reason: "terminal_foreground_not_agent" });
+    expect(sent).toEqual([]);
+  });
+
   it("P27b: a record that belongs to an older session is not an agent record: exactText as for any bare terminal seat", async () => {
     seedTerminalSeat();
     recordPane("pi");
