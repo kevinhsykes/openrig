@@ -17,6 +17,8 @@ import { discoverResumeToken } from "./agent-images/resume-token-discovery.js";
 import { resolveRebuildArtifacts } from "./session-source-rebuild-resolver.js";
 import { existsSync } from "node:fs";
 import { SuccessorSessionLauncher } from "./successor-session-launcher.js";
+import { isShellForeground } from "./shell-classifier.js";
+import { readTerminalLaunchActions } from "./terminal-launch-actions.js";
 import { deriveResumeToken, type ResumeTokenCaptureDeps } from "./resume-token-capture.js";
 import { validateResumeToken } from "./resume-token-validation.js";
 import type { RuntimeAdapter } from "./runtime-adapter.js";
@@ -30,6 +32,12 @@ import { seatCodexCorePluginDir, seatCorePluginDir, withPluginDirs } from "./cla
 import { seatSkillPluginDirForNode } from "./seat-skill-storage.js";
 import { recordConversationPromptForNode, recordForkConversationPromptForNode, seatLaunchAdditionsForLaunch } from "./seat-launch-additions.js";
 import { inspectStartupStagedText, startupNoInputLine, startupOwnCollapsedPaste, STARTUP_UNCONFIRMED_REASON } from "./startup-submission-evidence.js";
+
+/** P14: how often a terminal successor's pane is read for its foreground command, and how long before giving up. */
+const TERMINAL_AGENT_POLL_MS = 500;
+const TERMINAL_LAUNCH_INTERRUPT_ATTEMPTS = 4;
+const TERMINAL_LAUNCH_INTERRUPT_SETTLE_MS = 300;
+const TERMINAL_AGENT_READY_TIMEOUT_MS = 30_000;
 
 /** A bounded labeled-from-record recap of the predecessor's last exchanges + the record path,
  *  resolved from the predecessor's provider transcript (claude transcript_path / codex rollout_path).
@@ -81,7 +89,9 @@ export interface SeatHandoverMutationResult {
     startupContextDelivered: boolean;
     provenanceRecordWritten: false;
   };
-  restorePacket?: { status: "unconfirmed"; reason: string };
+  /** The context packet was sent but its submission is unconfirmed. `packet: "priming"` marks a rebuild's priming packet;
+   *  absent means the restore packet (the original meaning of this field). */
+  restorePacket?: { status: "unconfirmed"; reason: string; packet?: "priming" };
   /** OPR.0.5.5.5 — per-source execution outcome. fork: the resolved fork origin;
    *  rebuild: EXACTLY which durable artifacts primed the successor, which
    *  declared addresses were gaps, and (when the chain is empty) the named
@@ -175,6 +185,8 @@ interface SeatHandoverServiceDeps {
   ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
   /** Readiness timeout for the successor launch (tests shorten it). */
   readinessTimeoutMs?: number;
+  /** P14: how long a terminal successor's pane may take to leave its shell after its launch action is typed. */
+  terminalAgentReadyTimeoutMs?: number;
   /** Injectable sleep for the successor readiness backoff (tests). */
   sleep?: (ms: number) => Promise<void>;
   /**
@@ -247,6 +259,8 @@ export class SeatHandoverService {
   private rebuildArtifactExists: (path: string) => boolean;
   /** Injectable sleep (tests): also carries the shared paste-then-submit settle in deliverRestorePacket. */
   private sleep: (ms: number) => Promise<void>;
+  /** P14: the longest a terminal successor's pane may take to leave its shell after its launch command is typed. */
+  private readonly terminalAgentReadyTimeoutMs: number;
   private appliedLaunchObservations: AppliedLaunchObservationStore;
   private now: () => Date;
   private pluginsDir: string | undefined;
@@ -270,6 +284,7 @@ export class SeatHandoverService {
     this.rebuildPrimingResolver = deps.rebuildPrimingResolver ?? null;
     this.rebuildArtifactExists = deps.rebuildArtifactExists ?? existsSync;
     this.sleep = deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+    this.terminalAgentReadyTimeoutMs = deps.terminalAgentReadyTimeoutMs ?? TERMINAL_AGENT_READY_TIMEOUT_MS;
     this.appliedLaunchObservations = new AppliedLaunchObservationStore(deps.db);
     this.now = deps.now ?? (() => new Date());
     this.pluginsDir = deps.pluginsDir;
@@ -589,6 +604,8 @@ export class SeatHandoverService {
       // B16 — the recap was resolved at step 1b (pre-launch); an unavailable verdict rides the
       // packet as a NAMED line, never a silent omission.
       const resolved = "recap" in predecessorRecapResolution ? predecessorRecapResolution : null;
+      const notUp = await this.gateTerminalSuccessor(node, launch);
+      if (notUp) return notUp;
       const delivered = await this.deliverRestorePacket(launch.tmuxSession, {
         runtime: node.runtime,
         seatRef: input.seatRef,
@@ -673,7 +690,10 @@ export class SeatHandoverService {
         emptyChainReason = "artifacts" in chain ? "the durable chain resolved to zero artifacts" : chain.emptyReason;
       }
       sourceOutcome = { mode: "rebuild", primedArtifacts, gaps, ...(permissionContinuity ? { permissions: permissionContinuity } : {}), ...(emptyChainReason ? { emptyChainReason } : {}) };
+      const notUp = await this.gateTerminalSuccessor(node, launch);
+      if (notUp) return notUp;
       const delivered = await this.deliverRebuildPrimingPacket(launch.tmuxSession, {
+        runtime: node.runtime,
         seatRef: input.seatRef,
         reason,
         departingSession: latestSession.session_name,
@@ -692,7 +712,11 @@ export class SeatHandoverService {
           guidance: "The successor candidate was unwound and the seat's binding is unchanged; the seat is re-wakeable from its provider session file. Retry after tmux delivery is healthy.",
         };
       }
-      contextDelivered = true;
+      if (delivered.confirmation === "unconfirmed") {
+        restorePacket = { status: "unconfirmed", packet: "priming", reason: delivered.reason };
+      } else {
+        contextDelivered = true;
+      }
     }
 
     // 4. Verify continuity + rebind via the EXISTING discovered->commit path.
@@ -943,9 +967,114 @@ export class SeatHandoverService {
    *  interactive-text transport as the restore packet. The packet points the
    *  successor at the durable artifacts (it reads them itself) and names every
    *  gap and an empty chain out loud — never a silent partial priming. */
+  /**
+   * P14 (R4 D-B): a terminal-runtime successor starts as a BLANK SHELL, and its agent is started by the seat's persisted
+   * after_ready command. Typed before that agent is up, the context packet lands in bash and the launch fires afterwards.
+   * So for a terminal runtime, and only for it: type the persisted launch command, wait until the pane's foreground has
+   * left the shell (the inverse of the launcher's own blank-shell check), and only then let the packet be delivered. The
+   * evidence is the pane's foreground process. A Pi chat screen has no prompt glyph to read, and a process that dies at
+   * startup (a model that is not found) falls back to the shell, so it never counts.
+   *
+   * Every failure is named and takes the same unwind as a failed delivery: the candidate is cleaned up, the binding is
+   * unchanged, the seat is re-wakeable. Nothing is ever typed at the packet's expense into a shell.
+   * Returns null when the successor is fit to receive the packet (or is not a terminal seat).
+   */
+  private async gateTerminalSuccessor(
+    node: { id: string; runtime: string | null },
+    launch: { tmuxSession: string; tmuxPane: string; discoveredId: string },
+  ): Promise<{ ok: false; code: "context_delivery_failed"; message: string; guidance: string } | null> {
+    if (node.runtime !== "terminal") return null;
+    const up = await this.awaitTerminalAgent(node.id, launch.tmuxSession, launch.tmuxPane);
+    if (up.ok) return null;
+    await this.successorLauncher.cleanup(launch.tmuxSession, launch.discoveredId);
+    // P14c: when our own launch was typed, it is interrupted in the seat's pane (never a kill of the pane or session: the
+    // successor occupies the seat's preserved pane) and the outcome is named, so a late agent is not left unadopted unseen.
+    const interrupt = up.launchTyped ? await this.interruptOwnLaunch(launch.tmuxSession, launch.tmuxPane) : null;
+    return {
+      ok: false,
+      code: "context_delivery_failed",
+      message: `Handover failed at step "await-terminal-agent": [${up.reason}] ${up.message}${interrupt ? ` ${interrupt.message}` : ""}`,
+      guidance: `The successor candidate was unwound and the seat's binding is unchanged; no context packet was typed into the pane. ${interrupt ? `${interrupt.guidance} ` : ""}The seat is re-wakeable. Fix the cause named in the brackets, then retry.`,
+    };
+  }
+
+  /**
+   * P14c: Ctrl-C the launch this handover typed, in the seat's own pane, until the foreground is the shell again. Bounded;
+   * some agent CLIs need two. It never kills the pane or session, and it runs only after the launch was typed, so the
+   * foreground is our own launch (the launcher verified a blank shell before it). A failure is named with the pane id and
+   * what is still running.
+   */
+  private async interruptOwnLaunch(session: string, pane: string): Promise<{ message: string; guidance: string }> {
+    const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+    let foreground: string | null = null;
+    for (let attempt = 1; attempt <= TERMINAL_LAUNCH_INTERRUPT_ATTEMPTS; attempt++) {
+      await this.tmuxAdapter.sendKeys(session, ["C-c"]);
+      await this.sleep(TERMINAL_LAUNCH_INTERRUPT_SETTLE_MS);
+      foreground = await this.tmuxAdapter.getPaneCommand(pane);
+      if (foreground && isShellForeground(foreground, shell)) {
+        return {
+          message: `The launch this handover typed was interrupted in pane ${pane}, which is back at the shell (${attempt} Ctrl-C).`,
+          guidance: `The launch was interrupted in pane ${pane}; the pane is at the shell and no agent was left running in it.`,
+        };
+      }
+    }
+    return {
+      message: `The launch this handover typed could not be interrupted: pane ${pane} is ${foreground ? `still running "${foreground}"` : "unreadable"} after ${TERMINAL_LAUNCH_INTERRUPT_ATTEMPTS} Ctrl-C. Nothing was killed.`,
+      guidance: `Check pane ${pane} of ${session}: ${foreground ? `"${foreground}" is still running in it` : "its foreground could not be read"}, and it may start an agent that no seat has adopted. Stop it by hand before retrying.`,
+    };
+  }
+
+  private async awaitTerminalAgent(
+    nodeId: string,
+    session: string,
+    pane: string,
+  ): Promise<{ ok: true } | { ok: false; reason: string; message: string; launchTyped?: boolean }> {
+    const read = readTerminalLaunchActions(this.db, nodeId);
+    if (!read.ok) return { ok: false, reason: read.reason, message: `${read.detail}. A terminal seat's agent is started by its persisted startup action, so the packet was not typed.` };
+    if (read.actions.length === 0) {
+      return {
+        ok: false,
+        reason: "no_launch_action",
+        message: "the seat has no persisted after_ready launch command, so its successor would be a bare shell and the packet would be typed into bash. Nothing was typed.",
+      };
+    }
+    let typedAny = false;
+    for (const action of read.actions) {
+      const sent = await this.tmuxAdapter.sendText(session, action.value);
+      if (!sent.ok) return { ok: false, reason: "launch_action_failed", launchTyped: typedAny, message: `the launch command could not be typed (${(sent as { message?: string; error?: string }).message ?? (sent as { error?: string }).error ?? "send_text failed"})` };
+      typedAny = true;
+      await this.sleep(200); // the same settle between text and Enter every packet delivery here uses
+      const submitted = await this.tmuxAdapter.sendKeys(session, ["Enter"]);
+      if (!submitted.ok) return { ok: false, reason: "launch_action_failed", launchTyped: true, message: `the launch command could not be submitted (${(submitted as { message?: string; error?: string }).message ?? (submitted as { error?: string }).error ?? "Enter failed"})` };
+    }
+    // The agent is up when the pane's foreground is no longer the shell, seen on two polls in a row: one flash of a process
+    // that then falls back to the shell is not readiness.
+    const shell = (await this.tmuxAdapter.getDefaultShell()) ?? "/bin/sh";
+    const attempts = Math.max(1, Math.ceil((this.terminalAgentReadyTimeoutMs) / TERMINAL_AGENT_POLL_MS));
+    let consecutive = 0;
+    let last: string | null = null;
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      last = await this.tmuxAdapter.getPaneCommand(pane);
+      if (last && !isShellForeground(last, shell)) {
+        consecutive += 1;
+        if (consecutive >= 2) return { ok: true };
+      } else {
+        consecutive = 0;
+      }
+      await this.sleep(TERMINAL_AGENT_POLL_MS);
+    }
+    return {
+      ok: false,
+      reason: "agent_not_up",
+      launchTyped: true,
+      message: `the pane of ${session} ${last ? `was still running "${last}", the shell,` : "could not be read"} after the launch command was typed, so the agent did not come up within ${Math.round(this.terminalAgentReadyTimeoutMs / 1000)} s. The packet was not typed.`,
+    };
+  }
+
   private async deliverRebuildPrimingPacket(
     successorSession: string,
     info: {
+      runtime: string | null;
       seatRef: string;
       reason: string;
       departingSession: string;
@@ -953,7 +1082,7 @@ export class SeatHandoverService {
       gaps: string[];
       emptyChainReason?: string;
     },
-  ): Promise<{ ok: true } | { ok: false; message: string }> {
+  ): Promise<RestorePacketDelivery> {
     const lines = [
       `# Seat rebuild handover — ${info.seatRef}`,
       `You are a REBUILT successor for this seat (reason: ${info.reason}, at ${this.now().toISOString()}). Your predecessor session was ${info.departingSession}; its live context was deliberately NOT carried. Prime yourself from the durable artifacts below, highest trust first.`,
@@ -969,17 +1098,7 @@ export class SeatHandoverService {
     if (info.emptyChainReason) {
       lines.push("", `The durable chain is EMPTY: ${info.emptyChainReason}. You start from seat identity alone — say so in your first status report.`);
     }
-    const sent = await this.tmuxAdapter.sendText(successorSession, lines.join("\n"));
-    if (!sent.ok) {
-      return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
-    }
-    // Same spike-proven 200ms settle as the restore packet (staged-not-consumed class).
-    await this.sleep(200);
-    const submit = await this.tmuxAdapter.sendKeys(successorSession, ["Enter"]);
-    if (!submit.ok) {
-      return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
-    }
-    return { ok: true };
+    return this.submitPacketWithEvidence(successorSession, lines.join("\n"), info.runtime);
   }
 
   /** Deliver the captured restore packet to a fresh successor via the shipped
@@ -1003,6 +1122,12 @@ export class SeatHandoverService {
     },
   ): Promise<RestorePacketDelivery> {
     const packet = buildRestorePacket({ ...info, handoverAt: this.now().toISOString() });
+    return this.submitPacketWithEvidence(successorSession, packet, info.runtime);
+  }
+
+  /** The shared paste-then-submit tail for a handover's context packet (restore and rebuild priming): type it, submit it,
+   *  and, for a Claude successor, read the composer for evidence the packet was consumed. */
+  private async submitPacketWithEvidence(successorSession: string, packet: string, runtime: string | null): Promise<RestorePacketDelivery> {
     const sent = await this.tmuxAdapter.sendText(successorSession, packet);
     if (!sent.ok) {
       return { ok: false, message: (sent as { message?: string }).message ?? "send_text failed" };
@@ -1017,7 +1142,7 @@ export class SeatHandoverService {
     if (!submit.ok) {
       return { ok: false, message: (submit as { message?: string }).message ?? "submit failed" };
     }
-    if (info.runtime === "claude-code") {
+    if (runtime === "claude-code") {
       const afterSubmit = await this.waitForClaudeRestorePacketComposer(successorSession, packet);
       if (afterSubmit.state === "clear") return { ok: true, confirmation: "confirmed" };
       if (afterSubmit.state === "unverified") return { ok: true, confirmation: "unconfirmed", reason: afterSubmit.reason === "unobservable"

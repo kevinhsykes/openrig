@@ -461,6 +461,353 @@ describe("SeatHandoverService source execution (OPR.0.5.5.5)", () => {
     expect(liveSessionId(node.id)).toBe(sessionId);
     expect(discoveryRepo.getDiscoveredSession(row.id)).toMatchObject({ status: "claimed", claimedNodeId: other.id });
   });
+
+  // P14 (R4 D-B): a terminal-runtime successor is a BLANK SHELL. Its agent (Pi's chat screen) is started by the seat's
+  // persisted after_ready send_text, so the packet must not be typed until the pane has left the shell. Typed early, it
+  // lands in bash and the launch fires afterwards. The pane here is a small state machine: a shell until the launch
+  // command has been typed and submitted, then `node`.
+  describe("a terminal-runtime successor: the agent is up before the packet", () => {
+    const LAUNCH = "env HOME=/h PI_CODING_AGENT_DIR=/h/state/pi/dev-impl@seat-rig/agent pi --no-approve --continue";
+    const launchAction = (value = LAUNCH, over: Record<string, unknown> = {}) =>
+      ({ type: "send_text", value, phase: "after_ready", appliesOn: ["fresh_start", "restore"], idempotent: true, ...over });
+    let log: string[];
+    let agentUp: boolean;
+    let agentExitsAfterPolls: number | null;
+    let polls: number;
+
+    beforeEach(() => {
+      log = []; agentUp = false; agentExitsAfterPolls = null; polls = 0;
+      let lastText = "";
+      sendText.mockImplementation(async (_session: string, text: string) => {
+        lastText = text;
+        log.push(text.startsWith("# Seat rebuild handover") || text.startsWith("=== OpenRig seat handover") ? "packet" : text === LAUNCH ? "launch" : `text:${text.slice(0, 24)}`);
+        return { ok: true };
+      });
+      sendKeys.mockImplementation(async (_session: string, keys: string[]) => {
+        log.push(`keys:${keys.join("+")}`);
+        if (lastText === LAUNCH && keys.includes("Enter")) agentUp = true;
+        return { ok: true };
+      });
+      getPaneCommand.mockImplementation(async () => {
+        polls += agentUp ? 1 : 0;
+        if (agentUp && agentExitsAfterPolls !== null && polls > agentExitsAfterPolls) agentUp = false;
+        const command = agentUp ? "node" : "zsh";
+        log.push(`pane:${command}`);
+        return command;
+      });
+    });
+
+    function terminalService(): SeatHandoverService {
+      return new SeatHandoverService({
+        db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux(),
+        now: () => new Date("2026-04-24T18:30:00.000Z"),
+        newSuccessorId: () => "01SUCCID0",
+        runtimeAdapters: { terminal: { runtime: "terminal", launchHarness: async () => ({ ok: true }), checkReady: async () => ({ ready: true }) } as never },
+        contextUsageStore: { readSidecar } as never,
+        rebuildPrimingResolver: rebuildChain as never,
+        rebuildArtifactExists: artifactExists as never,
+        readinessTimeoutMs: 50,
+        sleep: async () => {},
+      });
+    }
+
+    /** A terminal seat with its persisted startup context: `actions` as the JSON array, or "missing" / "malformed". */
+    function seedTerminalSeat(actions: unknown[] | "missing" | "malformed" = [launchAction()]) {
+      const rig = rigRepo.createRig("seat-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "terminal", cwd: "/project" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateStartupStatus(session.id, "ready", "2026-04-20T12:00:00Z");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%0" });
+      if (actions !== "missing") {
+        db.prepare("INSERT INTO node_startup_context (node_id, projection_entries_json, resolved_files_json, startup_actions_json, runtime) VALUES (?, '[]', '[]', ?, 'terminal')")
+          .run(node.id, actions === "malformed" ? "{not json" : JSON.stringify(actions));
+      }
+      return { node };
+    }
+    const handover = (source: "rebuild" | "fresh") => terminalService().handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source });
+    const failed = (result: Awaited<ReturnType<typeof handover>>) => {
+      expect(result).toMatchObject({ ok: false, code: "context_delivery_failed" });
+      if (result.ok) throw new Error("expected a failure");
+      // The same unwind as a failed delivery: the successor candidate is vanished, the preserved seat is never killed.
+      const candidate = db.prepare("SELECT status FROM discovered_sessions WHERE tmux_session = ?").get("dev-impl@seat-rig") as { status: string } | undefined;
+      expect(candidate?.status).toBe("vanished");
+      expect(killSession).not.toHaveBeenCalled();
+      return result as { message: string; guidance: string };
+    };
+    const typedIntoShell = () => log.filter((entry) => entry === "packet");
+
+    it.each(["rebuild", "fresh"] as const)("%s: the persisted launch action is typed, the pane is seen to leave the shell, and only then is the packet typed", async (source) => {
+      seedTerminalSeat();
+      const result = await handover(source);
+      expect(result).toMatchObject({ ok: true });
+      const launch = log.indexOf("launch");
+      const up = log.indexOf("pane:node");
+      const packet = log.indexOf("packet");
+      expect(launch).toBeGreaterThanOrEqual(0);
+      expect(up).toBeGreaterThan(launch);
+      expect(packet).toBeGreaterThan(up);
+      expect(log[launch + 1]).toBe("keys:Enter"); // the launch is submitted, not just typed
+    });
+
+    it("the agent must be seen up twice in a row: one flash of a process that then falls back to the shell is not readiness", async () => {
+      seedTerminalSeat();
+      agentExitsAfterPolls = 1; // up for one poll, then back to the shell
+      const err = failed(await handover("rebuild"));
+      expect(err.message).toContain("agent_not_up");
+      expect(typedIntoShell()).toEqual([]);
+    });
+
+    it("rebuild: a pane that never leaves the shell fails by name, types no packet into it, and unwinds the successor", async () => {
+      const { node } = seedTerminalSeat([launchAction("pi --this-never-starts")]); // the pane never changes: agentUp stays false
+      const err = failed(await handover("rebuild"));
+      expect(err.message).toContain("agent_not_up");
+      expect(err.message).toMatch(/shell|"zsh"/);
+      expect(typedIntoShell()).toEqual([]);
+      expect(sessionRegistry.getBindingForNode(node.id)?.tmuxSession).toBe("dev-impl@seat-rig");
+      expect(nodeRow(node.id).handover_result).not.toBe("complete");
+    });
+
+    it("a pane whose command cannot be read is not evidence", async () => {
+      seedTerminalSeat();
+      // The launcher's own blank-shell check still sees the shell; once the launch command is typed, the pane cannot be read.
+      getPaneCommand.mockImplementation(async () => (agentUp ? null : "zsh"));
+      const err = failed(await handover("rebuild"));
+      expect(err.message).toContain("agent_not_up");
+      expect(typedIntoShell()).toEqual([]);
+    });
+
+    it.each(["rebuild", "fresh"] as const)("%s: a terminal seat with NO persisted launch action is refused by name before anything is typed", async (source) => {
+      seedTerminalSeat([]);
+      const err = failed(await handover(source));
+      expect(err.message).toContain("no_launch_action");
+      expect(log.filter((entry) => entry.startsWith("text:") || entry === "packet" || entry === "launch")).toEqual([]);
+    });
+
+    it("a missing or malformed startup context is refused by name, never read as 'nothing to launch'", async () => {
+      seedTerminalSeat("missing");
+      expect(failed(await handover("rebuild")).message).toContain("startup_context_missing");
+      db.prepare("DELETE FROM sessions").run(); db.prepare("DELETE FROM nodes").run(); db.prepare("DELETE FROM rigs").run();
+      log = [];
+      seedTerminalSeat("malformed");
+      expect(failed(await handover("rebuild")).message).toContain("startup_context_malformed");
+      expect(typedIntoShell()).toEqual([]);
+    });
+
+    it("only an after_ready send_text that applies to a fresh start is run: not after_files, a startup proof, a restore-only action or a slash command", async () => {
+      seedTerminalSeat([
+        launchAction("echo after-files", { phase: "after_files" }),
+        launchAction("echo restore-only", { appliesOn: ["restore"] }),
+        launchAction("/status", { type: "slash_command" }),
+        launchAction("proof", { type: "startup_proof" }),
+        launchAction(),
+      ]);
+      expect(await handover("rebuild")).toMatchObject({ ok: true });
+      expect(log.filter((entry) => entry.startsWith("text:"))).toEqual([]);
+      expect(log.filter((entry) => entry === "launch")).toHaveLength(1);
+    });
+
+    it("a launch action that cannot be typed fails by name and types no packet", async () => {
+      seedTerminalSeat();
+      sendText.mockImplementation(async () => ({ ok: false, error: "induced: tmux down" }));
+      const err = failed(await handover("rebuild"));
+      expect(err.message).toContain("launch_action_failed");
+      expect(typedIntoShell()).toEqual([]);
+    });
+
+    // P14c: after the launch was typed and the agent did not come up, our own launch is interrupted in the seat's pane
+    // (never a kill of the pane or session), and the outcome is named. `cc` counts the Ctrl-C keys that reached the pane.
+    describe("a launch that did not come up is interrupted in the seat's own pane", () => {
+      let cc: number;
+      /** A launch that starts late: the shell is read for the whole wait, then the agent appears and stays until `needs` Ctrl-C. */
+      function lateAgent(needs: number | null) {
+        cc = 0;
+        let enteredAt: number | null = null;
+        sendKeys.mockImplementation(async (_s: string, keys: string[]) => {
+          log.push(`keys:${keys.join("+")}`);
+          if (keys.includes("C-c")) cc += 1;
+          return { ok: true };
+        });
+        getPaneCommand.mockImplementation(async () => {
+          const sent = log.includes("launch");
+          if (!sent) return "zsh";
+          enteredAt = (enteredAt ?? polls);
+          polls += 1;
+          const waitOver = polls - enteredAt > 60;
+          const up = waitOver && (needs === null || cc < needs);
+          return up ? "node" : "zsh";
+        });
+      }
+
+      it.each([1, 2])("an agent that appears late and needs %i Ctrl-C is interrupted until the pane is at the shell, and the outcome is named", async (needs) => {
+        seedTerminalSeat();
+        lateAgent(needs);
+        const err = failed(await handover("rebuild"));
+        expect(err.message).toContain("agent_not_up");
+        expect(cc).toBe(needs);
+        expect(err.message).toMatch(/interrupted/i);
+        expect(err.message).toContain("%9");
+        expect(typedIntoShell()).toEqual([]);
+        expect(killSession).not.toHaveBeenCalled();
+      });
+
+      it("an agent that survives every Ctrl-C is named with the pane id and what it is running, and still nothing is killed", async () => {
+        const { node } = seedTerminalSeat();
+        lateAgent(null);
+        const err = failed(await handover("rebuild"));
+        expect(cc).toBeGreaterThanOrEqual(2);
+        expect(cc).toBeLessThanOrEqual(5);
+        expect(err.message).toContain("agent_not_up");
+        expect(err.message).toContain("%9");
+        expect(err.message).toContain("node");
+        expect(err.message).toMatch(/could not|still running|check/i);
+        expect(err.guidance).toContain("%9");
+        expect(killSession).not.toHaveBeenCalled();
+        expect(sessionRegistry.getBindingForNode(node.id)?.tmuxPane).toBe("%0");
+      });
+
+      it("a launch whose Enter failed is interrupted too, so the typed command does not stay on the line", async () => {
+        seedTerminalSeat();
+        cc = 0;
+        sendKeys.mockImplementation(async (_s: string, keys: string[]) => {
+          if (keys.includes("C-c")) { cc += 1; return { ok: true }; }
+          return keys.includes("Enter") && log.includes("launch") ? { ok: false, error: "induced" } : { ok: true };
+        });
+        getPaneCommand.mockImplementation(async () => "zsh");
+        const err = failed(await handover("rebuild"));
+        expect(err.message).toContain("launch_action_failed");
+        expect(cc).toBeGreaterThanOrEqual(1);
+      });
+
+      it("nothing was typed, nothing is interrupted: no launch action, a launch that cannot be typed, and a healthy start send no Ctrl-C", async () => {
+        seedTerminalSeat([]);
+        lateAgent(1);
+        failed(await handover("rebuild"));
+        expect(cc).toBe(0);
+        db.prepare("DELETE FROM sessions").run(); db.prepare("DELETE FROM nodes").run(); db.prepare("DELETE FROM rigs").run();
+        log = [];
+        seedTerminalSeat();
+        sendText.mockImplementation(async () => ({ ok: false, error: "induced: tmux down" }));
+        failed(await handover("rebuild"));
+        expect(cc).toBe(0);
+        expect(log.filter((e) => e === "keys:C-c")).toEqual([]);
+      });
+    });
+
+    it("other runtimes are untouched: a codex seat gets its packet at once, with no launch action and no pane polling for an agent", async () => {
+      seedSeat();
+      sendText.mockImplementation(async (_s: string, text: string) => { log.push(text.startsWith("# Seat rebuild handover") ? "packet" : "other"); return { ok: true }; });
+      expect(await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" })).toMatchObject({ ok: true });
+      expect(log.filter((entry) => entry === "packet")).toHaveLength(1);
+      expect(log).not.toContain("launch");
+    });
+  });
+
+  // P14b: the rebuild priming packet goes through the same paste-then-submit tail as the restore packet, so a packet left
+  // staged in a Claude composer is a named failure with the same unwind, not a success. The screen is modelled per Enter
+  // count: `afterEnter[n]` is what the composer shows after the n-th Enter (null = the screen cannot be read).
+  describe("a claude-code rebuild: the priming packet needs submission evidence", () => {
+    let packet: string;
+    let enters: number;
+    let screens: (string | null)[];
+    const emptyComposer = "Claude Code v2.1.303\n❯ \n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)";
+    const stagedComposer = () => `Claude Code v2.1.303\n${packet.split("\n").map((line, i) => i === 0 ? `❯ ${line}` : `  ${line}`).join("\n")}\n────────────────────\n  ⏵⏵ accept edits on (shift+tab to cycle)`;
+
+    function seedClaudeSeat() {
+      const rig = rigRepo.createRig("seat-rig");
+      const node = rigRepo.addNode(rig.id, "dev.impl", { runtime: "claude-code", cwd: "/project" });
+      const session = sessionRegistry.registerSession(node.id, "dev-impl@seat-rig");
+      sessionRegistry.updateStatus(session.id, "running");
+      sessionRegistry.updateStartupStatus(session.id, "ready", "2026-04-20T12:00:00Z");
+      sessionRegistry.updateBinding(node.id, { tmuxSession: "dev-impl@seat-rig", tmuxPane: "%0" });
+      return { node };
+    }
+    function claudeService(): SeatHandoverService {
+      return new SeatHandoverService({
+        db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: tmux(),
+        now: () => new Date("2026-04-24T18:30:00.000Z"),
+        newSuccessorId: () => "01SUCCID0",
+        runtimeAdapters: { "claude-code": { runtime: "claude-code", launchHarness: async () => ({ ok: true, resumeToken: "tok", resumeType: "claude_name" }), checkReady: async () => ({ ready: true }) } as never },
+        contextUsageStore: { readSidecar } as never,
+        rebuildPrimingResolver: rebuildChain as never,
+        rebuildArtifactExists: artifactExists as never,
+        readinessTimeoutMs: 50,
+        sleep: async () => {},
+      });
+    }
+    const rebuild = () => claudeService().handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+
+    beforeEach(() => {
+      packet = ""; enters = 0; screens = [];
+      sendText.mockImplementation(async (_s: string, text: string) => { if (text.startsWith("# Seat rebuild handover")) packet = text; return { ok: true }; });
+      sendKeys.mockImplementation(async (_s: string, keys: string[]) => { if (packet && keys.includes("Enter")) enters += 1; return { ok: true }; });
+      capturePaneScreen.mockImplementation(async () => {
+        if (!packet || enters === 0) return emptyComposer;
+        const screen = screens[Math.min(enters, screens.length) - 1];
+        return screen === undefined ? emptyComposer : screen === "STAGED" ? stagedComposer() : screen;
+      });
+    });
+
+    it("a packet still staged in the composer after the guarded retry is a named failure that unwinds the successor", async () => {
+      const { node } = seedClaudeSeat();
+      screens = ["STAGED", "STAGED"];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: false, code: "context_delivery_failed" });
+      if (result.ok) throw new Error("expected a failure");
+      expect(result.message).toContain("deliver-rebuild-priming");
+      expect(result.message).toContain("the prompt still looked staged in the input box");
+      expect(enters).toBe(2);
+      expect(db.prepare("SELECT status FROM discovered_sessions WHERE tmux_session = ?").get("dev-impl@seat-rig")).toMatchObject({ status: "vanished" });
+      expect(killSession).not.toHaveBeenCalled();
+      expect(nodeRow(node.id).handover_result).not.toBe("complete");
+    });
+
+    it("a packet submitted at once is delivered: one Enter, no retry, no unconfirmed note", async () => {
+      seedClaudeSeat();
+      screens = [emptyComposer];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true } } });
+      expect((result as { result: Record<string, unknown> }).result.restorePacket).toBeUndefined();
+      expect(enters).toBe(1);
+    });
+
+    it("a packet staged after the first Enter and submitted by the guarded retry is delivered", async () => {
+      seedClaudeSeat();
+      screens = ["STAGED", emptyComposer];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true } } });
+      expect(enters).toBe(2);
+    });
+
+    it("an input box that cannot be read does not fail the handover: it is recorded as an unconfirmed priming packet", async () => {
+      seedClaudeSeat();
+      screens = [null];
+      const result = await rebuild();
+      expect(result).toMatchObject({ ok: true, result: {
+        restorePacket: { status: "unconfirmed", packet: "priming", reason: "the input box could not be observed" },
+        sideEffects: { startupContextDelivered: false },
+      } });
+      expect(enters).toBe(1);
+    });
+
+    it("a Claude restore packet keeps its own unconfirmed record, with no packet discriminator", async () => {
+      seedClaudeSeat();
+      capturePaneScreen.mockImplementation(async () => null);
+      sendText.mockImplementation(async (_s: string, text: string) => { if (text.startsWith("=== OpenRig seat handover")) packet = text; return { ok: true }; });
+      const result = await claudeService().handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "fresh" });
+      expect(result).toMatchObject({ ok: true, result: { restorePacket: { status: "unconfirmed", reason: "the input box could not be observed" } } });
+      expect((result as { result: { restorePacket: Record<string, unknown> } }).result.restorePacket.packet).toBeUndefined();
+    });
+
+    it("a codex rebuild is unchanged: one Enter, the screen is never read for evidence", async () => {
+      seedSeat();
+      sendText.mockImplementation(async (_s: string, text: string) => { if (text.startsWith("# Seat rebuild handover")) packet = text; return { ok: true }; });
+      const result = await service.handover({ seatRef: "dev-impl@seat-rig", reason: "degraded-incumbent", source: "rebuild" });
+      expect(result).toMatchObject({ ok: true, result: { sideEffects: { startupContextDelivered: true } } });
+      expect(enters).toBe(1);
+      expect((result as { result: Record<string, unknown> }).result.restorePacket).toBeUndefined();
+    });
+  });
 });
 
 
