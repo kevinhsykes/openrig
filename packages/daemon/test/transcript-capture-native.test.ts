@@ -1,12 +1,12 @@
 import { expect, it } from "vitest";
 import { execFile, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { TranscriptStore } from "../src/domain/transcript-store.js";
 import { TmuxAdapter } from "../src/adapters/tmux.js";
-import { startTranscriptRotation, stopTranscriptRotation } from "../src/domain/transcript-rotation.js";
+import { ACTIVITY_HINT_DEADLINE_MS, CAPTURE_RESULT_DEADLINE_MS, startTranscriptRotation, stopTranscriptRotation } from "../src/domain/transcript-rotation.js";
 
 let nativeAvailable = process.platform !== "win32";
 try { execFileSync("tmux", ["-V"], { timeout: 2000, stdio: "ignore" }); } catch { nativeAvailable = false; }
@@ -67,7 +67,13 @@ it.skipIf(!nativeAvailable)("retains active native output before a normal stop d
     await run("send-keys", "-t", "seat", "-l", "first activity"); await run("send-keys", "-t", "seat", "Enter");
     await wait(2000);
     await run("send-keys", "-t", "seat", "-l", "final active output αβ"); await run("send-keys", "-t", "seat", "Enter");
-    await wait(1300);
+    // The configured cadence is 2 s. A fixed 1.3 s sleep stops the generation
+    // before the next capture on a loaded runner, and stop intentionally rejects
+    // in-flight writes. Observe actual persistence within the capture budget.
+    const deadline = Date.now() + 2000 + ACTIVITY_HINT_DEADLINE_MS + CAPTURE_RESULT_DEADLINE_MS + 1000;
+    const persisted = () => existsSync(file) && readFileSync(file, "utf8").includes("final active output αβ");
+    while (!persisted() && Date.now() < deadline) await wait(50);
+    expect(persisted(), "active output persisted within the cadence, hint, capture and shared-tick budget").toBe(true);
     stopTranscriptRotation("seat");
     expect(readFileSync(file, "utf8")).toContain("final active output αβ");
   } finally {
