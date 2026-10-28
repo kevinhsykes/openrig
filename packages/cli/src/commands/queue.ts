@@ -570,6 +570,22 @@ async function printWriteResult(client: DaemonClient, json: boolean, body: unkno
 }
 
 // Recovery belongs to the selected daemon's reply; never infer a host from an ID.
+/** P29: the daemon's destination rail check answered with a warning (the row was still written). stderr, so stdout stays the result. */
+function printDestinationRailWarnings(data: unknown, status: number): void {
+  if (status >= 400 || data === null || typeof data !== "object") return;
+  const list = (data as { advisories?: unknown }).advisories;
+  if (!Array.isArray(list)) return;
+  for (const advisory of list as Array<{ code?: unknown; message?: unknown; overridden?: unknown }>) {
+    if (advisory.code === "destination_rail_unavailable" && typeof advisory.message === "string") {
+      console.error(`Warning: the destination's rail may not take this work${advisory.overridden === true ? " (sent anyway: --allow-exhausted-destination)" : ""}: ${advisory.message.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "")}`);
+    }
+  }
+}
+
+/** The body field behind --allow-exhausted-destination. */
+const allowExhausted = (opts: unknown): { allowExhaustedDestination?: true } =>
+  (opts as { allowExhaustedDestination?: boolean }).allowExhaustedDestination === true ? { allowExhaustedDestination: true } : {};
+
 async function printQueueItemResult(
   client: DaemonClient,
   qitemId: string,
@@ -890,6 +906,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
     .option("--reply-to <qitemId>", "Post this update into an earlier qitem's Slack thread (requires --human-intent update; posts as a new top-level message instead if that thread can't be used, e.g. it is missing or still has an open human decision; --verify reports why)")
     .option("--human-questions-file <path>", "#193: JSON array of 1-4 questions for a decision, each {id, question, options: [{id, label, recommended?}]} with 2-4 options; Slack shows them as buttons")
     .option("--evidence-ref <path>", "OPR.0.4.4.19 FR-5: pointer to the durable artifact a human judges (e.g. a PROOF.md path). Required by the daemon when the item is human-routed; optional otherwise.")
+    .option("--allow-exhausted-destination", "Send even if the daemon's destination check refuses because the seat's rail is exhausted (only matters when the operator turned the check's refuse mode on). The override is recorded on the row.")
     .option("--dedupe-key <key>", "Keep at most one OPEN row per destination and key: when one is open, it is returned and nothing is written (a closed row frees the key). 1 to 200 characters. A daemon that cannot keep the key unique is reported, not silently trusted")
     .option("--host <id>", QUEUE_HOST_OPTION_HELP)
     .option("--no-nudge", "Suppress the default destination nudge (cold-queue)")
@@ -1060,6 +1077,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           summary: opts.summary,
           evidenceRef: opts.evidenceRef,
           ...(opts.dedupeKey !== undefined ? { dedupeKey: opts.dedupeKey } : {}),
+          ...allowExhausted(opts),
           priority: opts.priority,
           tier: opts.tier,
           tags,
@@ -1095,6 +1113,7 @@ export function queueCommand(depsOverride?: QueueDeps): Command {
           for (const advisory of advisories) {
             if (status < 400 && advisory.code === "shared_channel_correspondence" && typeof advisory.message === "string") console.error(`Warning: ${advisory.message}`);
           }
+          printDestinationRailWarnings(created, status);
           if (opts.verify && status < 400) {
             const createdId = typeof created.qitemId === "string" ? created.qitemId : null;
             const delivery = createdId
@@ -1409,6 +1428,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .description("Transactional handoff: closes source as handed-off + creates new qitem owned by --to")
     .option("--from <session>", "(deprecated, ignored) the handing-off seat is derived from the seat env (X-OpenRig-Session); P21 I3 made the handoff route derive it from the transport header")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
+    .option("--allow-exhausted-destination", "Send even if the daemon's destination check refuses because the seat's rail is exhausted (only matters when the operator turned the check's refuse mode on). The override is recorded on the row.")
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
@@ -1485,6 +1505,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff`, {
+          ...allowExhausted(opts),
           toSession: hostResolved.destination,
           body: resolvedBody,
           summary: opts.summary,
@@ -1500,6 +1521,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         }, crossHostWriteOptions(hostResolved.hostId));
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
+        printDestinationRailWarnings(res.data, res.status);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
@@ -1513,6 +1535,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     )
     .option("--from <session>", "(deprecated, ignored) the handing-off seat is derived from the seat env (X-OpenRig-Session); P21 I3 made the handoff route derive it from the transport header")
     .requiredOption("--to <session>", "Destination seat receiving the new qitem")
+    .option("--allow-exhausted-destination", "Send even if the daemon's destination check refuses because the seat's rail is exhausted (only matters when the operator turned the check's refuse mode on). The override is recorded on the row.")
     .option("--body <text>", "New qitem body inline (use - to read from stdin; mutually exclusive with --body-file). Omit both to keep the source body.")
     .option("--body-file <path>", "Read the new qitem body from a file path (use - for stdin; mutually exclusive with --body). Kills the backtick-shell-corruption class.")
     .option("--note <text>", "Transition note")
@@ -1587,6 +1610,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
       const tags = dedupedTags.length > 0 ? dedupedTags : undefined;
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/handoff-and-complete`, {
+          ...allowExhausted(opts),
           toSession: hostResolved.destination,
           body: resolvedBody,
           summary: opts.summary,
@@ -1602,6 +1626,7 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
         }, crossHostWriteOptions(hostResolved.hostId));
         const hint = hostSubstitutionHint(res.status, res.data, opts.to, opts.host, hostResolved);
         if (hint) console.error(hint);
+        printDestinationRailWarnings(res.data, res.status);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status, writeReceipt(opts.full, {
           verb: "handoff-and-complete", nudgeSuppressed: opts.nudge === false, remoteHost: remoteHostOf(hostResolved.hostId),
         }));
@@ -1635,15 +1660,18 @@ workspace home that is deferred/not-imminent belongs in its mission/slice.`)
     .command("fallback <qitemId>")
     .description("Reroute a qitem to a fallback destination (e.g. unreachable seat)")
     .requiredOption("--destination <session>", "Fallback destination seat")
+    .option("--allow-exhausted-destination", "Send even if the daemon's destination check refuses because the seat's rail is exhausted (only matters when the operator turned the check's refuse mode on). The override is recorded on the row.")
     .option("--reason <text>", "Reason for fallback", "manual")
     .option("--json", "JSON output for agents")
     .action(async (qitemId: string, opts: { destination: string; reason: string; json?: boolean }) => {
       const deps = getDeps();
       await withClient(deps, async (client) => {
         const res = await client.post<unknown>(`/api/queue/${encodeURIComponent(qitemId)}/fallback`, {
+          ...allowExhausted(opts),
           fallbackDestination: opts.destination,
           reason: opts.reason,
         });
+        printDestinationRailWarnings(res.data, res.status);
         await printQueueItemResult(client, qitemId, opts.json ?? false, res.data, res.status);
       });
     });

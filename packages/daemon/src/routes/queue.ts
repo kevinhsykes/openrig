@@ -28,6 +28,7 @@ import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { deriveCurrentWork, deriveCurrentWorkChoice, deriveRole, deriveWorkCandidates, type CurrentWorkRow, type MissionsRootResolver, type RoleOrientation } from "../domain/current-work.js";
 import { listProjects, projectCatalogPaths } from "../domain/workspace/project-read.js";
 import { readProjectCatalog } from "../domain/workspace/project-catalog.js";
+import { QueueDestinationChecker, type DestinationCheckResult } from "../domain/queue-rail-check.js";
 import type { WhoamiService } from "../domain/whoami-service.js";
 import type Database from "better-sqlite3";
 import { HumanModeService } from "../domain/gateway/human-operating-modes.js";
@@ -112,6 +113,33 @@ export function queueRoutes(): Hono {
     // must neither fail that write nor misreport membership as unmatched.
     try { return getRepo(c).destinationAdvisory(sessionRef); }
     catch { return null; }
+  }
+  // P29 — the destination rail check (see domain/queue-rail-check.ts). Warn-only unless the operator turned refuse mode on.
+  const defaultRailChecker = new QueueDestinationChecker({ debug: (line) => console.debug(line) });
+  async function railCheck(c: { get: (key: string) => unknown }, destinationSession: string): Promise<DestinationCheckResult> {
+    try {
+      // Only an agent seat has a rail: a human, a hosted member, an @external address or an unroutable name skips the hook.
+      if (getRepo(c).classifyDestinationOf(destinationSession).class !== "pane-bound") return { kind: "skipped", reason: "not an agent seat" };
+      const checker = (c.get("queueRailChecker" as never) as QueueDestinationChecker | undefined) ?? defaultRailChecker;
+      return await checker.check(destinationSession);
+    } catch { return { kind: "error", reason: "the destination check failed" }; }   // never blocks a write
+  }
+  const railOverride = (body: unknown) => (body as { allowExhaustedDestination?: unknown }).allowExhaustedDestination === true;
+  /** The 409 that refuse mode answers with, or null when the write may go on (no refusal, or the caller overrode it). */
+  function railRefusal(c: { json: (b: unknown, s: 409) => Response }, rail: DestinationCheckResult, destinationSession: string, override: boolean): Response | null {
+    if (rail.kind !== "refuse" || override) return null;
+    return c.json({ error: "destination_rail_exhausted", destinationSession, message: rail.message,
+      hint: "Route the row to a seat whose rail can take work, or repeat the request with allowExhaustedDestination: true (--allow-exhausted-destination); the override is recorded on the row." }, 409);
+  }
+  function railAdvisory(rail: DestinationCheckResult, destinationSession: string, overridden: boolean) {
+    if (rail.kind !== "warn" && rail.kind !== "refuse") return null;
+    return { code: "destination_rail_unavailable", destinationSession, exitCode: rail.code, overridden, message: rail.message };
+  }
+  /** The row's own record of the warning: a transition note that already exists on handoff, with the override named. */
+  function noteWithRail(note: string | undefined, rail: DestinationCheckResult, overridden: boolean): string | undefined {
+    if (rail.kind !== "warn" && rail.kind !== "refuse") return note;
+    const line = `[destination check${overridden ? ", OVERRIDDEN with allow-exhausted-destination" : ""}] ${rail.message}`;
+    return note ? `${note}\n${line}` : line;
   }
   /** An ask (anything but an update) to a shared channel is accepted, with a word to the agent: the channel's replies
    *  come back as correspondence, never as an answer, so nothing there will settle it. Context, not a refusal. */
@@ -621,6 +649,10 @@ export function queueRoutes(): Hono {
     try {
       const fence = classificationRefusal(c, sourceSession, body.classificationBinding);
       if (fence) return fence;
+      const rail = await railCheck(c, body.destinationSession!);
+      const overridden = rail.kind === "refuse" && railOverride(body);
+      const refusal409 = railRefusal(c, rail, body.destinationSession!, railOverride(body));
+      if (refusal409) return refusal409;
       const item = await getRepo(c).create({
         qitemId: body.qitemId,
         sourceSession,
@@ -628,7 +660,7 @@ export function queueRoutes(): Hono {
         body: body.body!,
         priority: body.priority,
         tier: body.tier,
-        tags: body.tags,
+        tags: overridden ? [...(body.tags ?? []), "allow-exhausted-destination"] : body.tags,   // create has no note: the override is a tag
         expiresAt: body.expiresAt,
         chainOfRecord: body.chainOfRecord,
         targetRepo: body.targetRepo,
@@ -643,7 +675,7 @@ export function queueRoutes(): Hono {
         nudge: (body as { nudge?: boolean }).nudge,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent)].filter(Boolean);
+      const advisories = [destinationAdvisory(c, item.destinationSession), sharedChannelAskAdvisory(item.destinationSession, body.humanIntent), railAdvisory(rail, item.destinationSession, overridden)].filter(Boolean);
       // A create that found its dedupeKey held answers 200 with the open row; a new row is 201.
       return c.json({ ...item, ...(advisories.length ? { advisories } : {}) }, item.deduped ? 200 : 201);
     } catch (err) {
@@ -831,13 +863,17 @@ export function queueRoutes(): Hono {
       return crossHostHandoff(c, qitemId, body.hostId, "handed-off", crossHostBody, createSuccessorInProcess(c));
     }
 
+    const rail = await railCheck(c, body.toSession);
+    const overridden = rail.kind === "refuse" && railOverride(body);
+    const refusal409 = railRefusal(c, rail, body.toSession, railOverride(body));
+    if (refusal409) return refusal409;
     try {
       const result = await getRepo(c).handoff({
         qitemId,
         fromSession,
         toSession: body.toSession,
         body: body.body,
-        transitionNote: body.transitionNote,
+        transitionNote: noteWithRail(body.transitionNote, rail, overridden),
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,
@@ -848,8 +884,8 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         ...resolveRecordedIdentity(c, identity), // P21 §4 era-stamp, plus the MCP adapter's caller on a direct attributed request (principal:v1)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const advisories = [destinationAdvisory(c, result.created.destinationSession), railAdvisory(rail, result.created.destinationSession, overridden)].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -916,13 +952,17 @@ export function queueRoutes(): Hono {
       return crossHostHandoff(c, qitemId, body.hostId, "done", crossHostBody, createSuccessorInProcess(c));
     }
 
+    const rail = await railCheck(c, body.toSession);
+    const overridden = rail.kind === "refuse" && railOverride(body);
+    const refusal409 = railRefusal(c, rail, body.toSession, railOverride(body));
+    if (refusal409) return refusal409;
     try {
       const result = await getRepo(c).handoffAndComplete({
         qitemId,
         fromSession,
         toSession: body.toSession,
         body: body.body,
-        transitionNote: body.transitionNote,
+        transitionNote: noteWithRail(body.transitionNote, rail, overridden),
         priority: body.priority,
         tier: body.tier,
         tags: body.tags,
@@ -933,8 +973,8 @@ export function queueRoutes(): Hono {
         humanAlert: body.humanAlert,
         identityProvenance: resolveRecordedProvenance(c, identity), // P21 §4 era-stamp: transport:v1 if the header named the actor here, else claimed:v1 (resolveRecordedProvenance degrades)
       });
-      const advisory = destinationAdvisory(c, result.created.destinationSession);
-      return c.json({ ...result, ...(advisory ? { advisories: [advisory] } : {}) }, 201);
+      const advisories = [destinationAdvisory(c, result.created.destinationSession), railAdvisory(rail, result.created.destinationSession, overridden)].filter(Boolean);
+      return c.json({ ...result, ...(advisories.length ? { advisories } : {}) }, 201);
     } catch (err) {
       return errorResponse(c, err);
     }
@@ -981,9 +1021,14 @@ export function queueRoutes(): Hono {
     const qitemId = c.req.param("qitemId");
     const body = await c.req.json<{ fallbackDestination?: string; reason?: string }>().catch(() => ({} as never));
     if (!body.fallbackDestination) return c.json({ error: "fallbackDestination is required" }, 400);
+    const rail = await railCheck(c, body.fallbackDestination);
+    const overridden = rail.kind === "refuse" && railOverride(body);
+    const refusal409 = railRefusal(c, rail, body.fallbackDestination, railOverride(body));
+    if (refusal409) return refusal409;
     try {
-      const item = getRepo(c).routeToFallback(qitemId, body.fallbackDestination, body.reason ?? "manual");
-      return c.json(item);
+      const item = getRepo(c).routeToFallback(qitemId, body.fallbackDestination, noteWithRail(body.reason ?? "manual", rail, overridden)!);
+      const advisory = railAdvisory(rail, body.fallbackDestination, overridden);
+      return c.json(advisory ? { ...item, advisories: [advisory] } : item);
     } catch (err) {
       return errorResponse(c, err);
     }
