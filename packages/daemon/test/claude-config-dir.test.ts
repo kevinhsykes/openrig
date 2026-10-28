@@ -1,9 +1,9 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, linkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import type { ClaudeAuthReader } from "../src/domain/provider/claude-auth-status-reader.js";
-import { claudeConfigDirPresent, claudeConfigDirProblem, parseClaudeAccounts, readClaudeAccountsFile, realClaudeConfigDirProbe } from "../src/domain/provider/claude-config-dir.js";
+import { claudeAuthReaderEnv, type ClaudeAuthReader } from "../src/domain/provider/claude-auth-status-reader.js";
+import { claudeConfigDirPresent, claudeConfigDirProblem, claudeConfigDirsShareConversation, parseClaudeAccounts, readClaudeAccountsFile, realClaudeConfigDirProbe } from "../src/domain/provider/claude-config-dir.js";
 
 // The secret-safe half of moving a seat between Claude accounts: the declared config-dir homes, the shape a home's path must
 // have, and one login probe per home. The declared file may carry other fields; only each entry's dir and label are kept.
@@ -11,6 +11,34 @@ import { claudeConfigDirPresent, claudeConfigDirProblem, parseClaudeAccounts, re
 const cleanup: Array<() => void> = [];
 afterEach(() => { for (const f of cleanup.splice(0)) f(); });
 const tmp = () => { const d = mkdtempSync(path.join(tmpdir(), "claude-config-dir-unit-")); cleanup.push(() => rmSync(d, { recursive: true, force: true })); return d; };
+
+describe("native conversation visibility across config dirs", () => {
+  it("refuses missing and separate copies, but accepts the same regular transcript through shared storage", () => {
+    const source = path.join(tmp(), "source"), target = path.join(tmp(), "target");
+    const token = "11111111-1111-4111-8111-111111111111";
+    const project = path.join(source, "projects", "fixture");
+    mkdirSync(project, { recursive: true });
+    mkdirSync(target);
+    writeFileSync(path.join(project, `${token}.jsonl`), '{"type":"user","message":{"content":"fixture"}}\n');
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(false);
+    const copied = path.join(target, "projects", "fixture");
+    mkdirSync(copied, { recursive: true });
+    writeFileSync(path.join(copied, `${token}.jsonl`), '{"type":"user","message":{"content":"fixture"}}\n');
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(false);
+    rmSync(path.join(copied, `${token}.jsonl`));
+    linkSync(path.join(project, `${token}.jsonl`), path.join(copied, `${token}.jsonl`));
+    // Sharing only the file leaves auxiliary session resources in different directories.
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(false);
+    rmSync(path.join(target, "projects"), { recursive: true });
+    symlinkSync(path.join(source, "projects"), path.join(target, "projects"), "dir");
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(true);
+    expect(claudeConfigDirsShareConversation(source, target, "../../outside")).toBe(false);
+    expect(claudeConfigDirsShareConversation(source, target, null)).toBe(false);
+    rmSync(path.join(project, `${token}.jsonl`));
+    mkdirSync(path.join(project, `${token}.jsonl`));
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(false);
+  });
+});
 
 describe("parseClaudeAccounts", () => {
   it("keeps each account's key, label and normalized dir, and nothing else the file carries", () => {
@@ -68,9 +96,9 @@ describe("readClaudeAccountsFile / claudeConfigDirProblem / claudeConfigDirPrese
 describe("realClaudeConfigDirProbe maps the auth-status answer for one dir, keeping only state, plan and the account's own address", () => {
   const at = "2026-10-27T00:00:00Z";
   it("logged in, not logged in, and every other failure as unreadable with its reason", async () => {
-    const seen: string[] = [];
+    const seen: Array<string | null> = [];
     const probe = (answers: Record<string, Awaited<ReturnType<ClaudeAuthReader>>>) =>
-      realClaudeConfigDirProbe({ reader: (dir) => async () => { seen.push(dir); return answers[dir]!; } });
+      realClaudeConfigDirProbe({ reader: (dir) => async () => { seen.push(dir); return answers[dir ?? ""]!; } });
     const p = probe({
       "/in": { ok: true, observedAt: at, auth: { loggedIn: true, authMethod: "claude.ai", email: "a@example.test", orgId: "o", orgName: "Org", subscriptionType: "max" } },
       "/out": { ok: false, at, reason: "not_logged_in", detail: "none" },
@@ -85,5 +113,19 @@ describe("realClaudeConfigDirProbe maps the auth-status answer for one dir, keep
   it("a reader that throws reads as unreadable, never as logged in", async () => {
     const p = realClaudeConfigDirProbe({ reader: () => async () => { throw new Error("boom"); } });
     expect(await p("/x")).toEqual({ state: "unreadable", reason: "spawn_failed", detail: "the reader failed: boom" });
+  });
+  it("an inherited unset selection is probed without pinning the effective default directory", async () => {
+    const seen: Array<string | null> = [];
+    const probe = realClaudeConfigDirProbe({ reader: (dir) => async () => {
+      seen.push(dir);
+      return { ok: false, at, reason: "not_logged_in", detail: "none" };
+    } });
+    await probe("/home/test/.claude", { selected: null });
+    await probe("/rig/home", { selected: "/rig/home" });
+    expect(seen).toEqual([null, "/rig/home"]);
+    const base = { HOME: "/home/test", CLAUDE_CONFIG_DIR: "/other" };
+    expect(claudeAuthReaderEnv({ claudeConfigDir: null }, base).CLAUDE_CONFIG_DIR).toBeUndefined();
+    expect(claudeAuthReaderEnv({}, base).CLAUDE_CONFIG_DIR).toBe("/other");
+    expect(claudeAuthReaderEnv({ claudeConfigDir: "/rig/home" }, base).CLAUDE_CONFIG_DIR).toBe("/rig/home");
   });
 });

@@ -35,7 +35,7 @@ export type ClaudeAuthReader = () => Promise<UsageReadOutcome<ClaudeAuthAnswer>>
 export interface ClaudeAuthReaderOptions {
   launchPath?: string;
   home?: string;
-  claudeConfigDir?: string;
+  claudeConfigDir?: string | null;
   timeoutMs?: number;
   /** How long a stopped process group gets after TERM before KILL (and after KILL before giving up). */
   graceMs?: number;
@@ -76,7 +76,8 @@ export function claudeAuthReaderEnv(options: ClaudeAuthReaderOptions, base: Node
   }
   if (options.launchPath) env.PATH = options.launchPath;
   if (options.home) env.HOME = options.home;
-  if (options.claudeConfigDir) env.CLAUDE_CONFIG_DIR = options.claudeConfigDir;
+  if (options.claudeConfigDir === null) delete env.CLAUDE_CONFIG_DIR;
+  else if (options.claudeConfigDir) env.CLAUDE_CONFIG_DIR = options.claudeConfigDir;
   env.DISABLE_AUTOUPDATER = "1";
   return env;
 }

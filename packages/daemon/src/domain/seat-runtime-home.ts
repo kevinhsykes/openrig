@@ -20,7 +20,8 @@ export interface SeatRuntimeHome {
  *  the declaration: the daemon's explicit value and the native default stay with each caller, so a seat that declares
  *  nothing resolves exactly as before. A configured home names where the seat's runtime looks; it isn't proof of which
  *  login a running process uses. */
-export function seatRuntimeHome(db: Database.Database, nodeId: string | null | undefined, runtime: HomeRuntime): SeatRuntimeHome {
+export function seatRuntimeHome(db: Database.Database, nodeId: string | null | undefined, runtime: HomeRuntime,
+  opts: { ignoreMember?: boolean } = {}): SeatRuntimeHome {
   if (!nodeId) return {};
   let row: { member: string | null; rig: string | null } | undefined;
   try {
@@ -29,6 +30,7 @@ export function seatRuntimeHome(db: Database.Database, nodeId: string | null | u
   } catch { return {}; } // A database from before seat env has no columns to read.
   const name = RUNTIME_HOME_VAR[runtime];
   for (const [source, json] of [["member", row?.member], ["rig", row?.rig]] as const) {
+    if (source === "member" && opts.ignoreMember) continue;
     const value = parseStoredSeatEnv(json)?.[name];
     if (value === undefined) continue;
     // The member's value shadows the rig's in the seat's environment, so the first declaration decides.

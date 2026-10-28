@@ -221,6 +221,16 @@ describe("provider routes", () => {
     expect(res.status).toBe(400);
   });
 
+  it("rejects malformed inherited-config selectors before reaching the service", async () => {
+    const app = appWith(stubService);
+    const query = await app.request("/api/provider/precheck?seat=s1&toAccount=x&inheritConfigDir=garbage");
+    expect(query.status).toBe(400);
+    const body = await app.request("/api/provider/switch", { method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ seat: "s1", toAccount: "x", forceUnsafe: false, inheritConfigDir: "true" }) });
+    expect(body.status).toBe(400);
+  });
+
   it("an UNWIRED service returns a loud 503 provider_service_unavailable (never a fabricated stub)", async () => {
     const res = await appWith(null).request("/api/provider/status");
     expect(res.status).toBe(503);

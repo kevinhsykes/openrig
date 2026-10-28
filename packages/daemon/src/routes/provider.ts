@@ -327,8 +327,11 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
     const tokenFile = c.req.query("storedLogin") === "1" ? null : c.req.query("tokenFile");
     // Or the config dir of another Claude account, for a move between accounts.
     const configDir = c.req.query("configDir");
+    const inheritValue = c.req.query("inheritConfigDir");
+    if (inheritValue !== undefined && inheritValue !== "1" && inheritValue !== "0") return c.json({ error: "inheritConfigDir must be 1 or 0" }, 400);
+    const inheritConfigDir = inheritValue === "1";
     // An unsafe verdict is a valid 200 response, not an error.
-    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
+    return c.json(await svc.precheck({ seat, toAccount, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}), ...(inheritConfigDir ? { inheritConfigDir } : {}) }, seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 
   router.post("/switch", async (c) => {
@@ -359,11 +362,13 @@ export function providerRoutes(opts: ProviderRoutesOptions = {}): Hono {
       return c.json({ error: "tokenFile must be a path, or null for the stored login" }, 400);
     }
     const configDir = body["configDir"];
+    const inheritConfigDir = body["inheritConfigDir"];
+    if (inheritConfigDir !== undefined && typeof inheritConfigDir !== "boolean") return c.json({ error: "inheritConfigDir must be a boolean" }, 400);
     if (configDir !== undefined && typeof configDir !== "string") {
       return c.json({ error: "configDir must be an absolute path" }, 400);
     }
     // Business outcome (incl. failed_safely / rebind_in_progress) is an explicit 200 payload.
-    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}) },
+    return c.json(await svc.switchAccount({ seat, toAccount, forceUnsafe, ...(tokenFile !== undefined ? { tokenFile } : {}), ...(configDir !== undefined ? { configDir } : {}), ...(inheritConfigDir !== undefined ? { inheritConfigDir } : {}) },
       seatRestartOf(c), claudeSeatOf(c)), 200);
   });
 

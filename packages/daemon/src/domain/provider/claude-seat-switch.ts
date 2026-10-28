@@ -1,9 +1,10 @@
+import os from "node:os";
 import path from "node:path";
-import { claudeConfigRootFor, memberRuntimeHome } from "../seat-runtime-home.js";
+import { claudeConfigRootFor, memberRuntimeHome, seatRuntimeHome } from "../seat-runtime-home.js";
 import type { RigRepository } from "../rig-repository.js";
 import { shellQuote } from "../../adapters/shell-quote.js";
 import { claudeSeatTokenFileProblem, claudeSeatTokenRefProblem, isClaudeSeatTokenFallback, type ClaudeSeatTokenRef } from "../claude-seat-token.js";
-import { claudeConfigDirPresent, claudeConfigDirProblem, type ClaudeConfigDirProbe } from "./claude-config-dir.js";
+import { claudeConfigDirPresent, claudeConfigDirProblem, claudeConfigDirsShareConversation, type ClaudeConfigDirProbe } from "./claude-config-dir.js";
 import type { ClaudeSwitchView, PrecheckReason, PrecheckResult } from "./provider-types.js";
 import type { ClaudeCredentialPrecedence, ClaudeSeatRelaunch, ProviderPrecheckInput, ProviderSwitchInput, ProviderSwitchResult, SeatSwitchReport } from "./provider-service.js";
 
@@ -13,7 +14,8 @@ export const STORED_LOGIN = "stored-login";
 type ClaudeSeat = NonNullable<ReturnType<ClaudeSeatRelaunch["seat"]>>;
 type ClaudeCheck =
   | { ok: false; verdict: Extract<PrecheckResult, { safe: false }> }
-  | { ok: true; verdict: Extract<PrecheckResult, { safe: true }>; ref: ClaudeSeatTokenRef | null; instead: string | null; configDir?: string };
+  | { ok: true; verdict: Extract<PrecheckResult, { safe: true }>; ref: ClaudeSeatTokenRef | null; instead: string | null; configDir?: string;
+      inheritedConfigDir?: { effective: string; selected: string | null } };
 
 /** What a config-dir check needs beyond the seat: the relaunch's view of the seat's dir and the login probe. */
 export interface ClaudeConfigDirDeps {
@@ -30,6 +32,7 @@ export async function checkClaudeSeat(input: ProviderPrecheckInput, seat: Claude
   const refuse = (reason: PrecheckReason, message: string, claude?: ClaudeSwitchView): ClaudeCheck =>
     ({ ok: false, verdict: { safe: false, reasons: [reason], message, ...(claude ? { claude } : {}) } });
   if (!precedence) return refuse("rebind_unsupported_for_runtime", "This daemon can't check what would outrank a Claude seat's own token, so it doesn't move Claude seats.");
+  if (input.inheritConfigDir && input.configDir === undefined) return refuse("invalid_config_dir", "An inherited move requires the expected config dir. Nothing changed.");
   if (input.configDir !== undefined) return checkConfigDirMove(input, input.configDir, seat, precedence, configDeps, refuse);
   if (input.tokenFile === undefined) {
     return refuse("token_file_required", "A Claude seat moves to its own subscription token with --to-account <label> --token-file <absolute path to a 0600 "
@@ -71,11 +74,18 @@ async function checkConfigDirMove(input: ProviderPrecheckInput, dirInput: string
   if (!relaunch?.configDir || !relaunch.setConfigDir || !probe) {
     return refuse("rebind_unsupported_for_runtime", "This daemon can't set a Claude seat's config dir or read a config dir's login, so it doesn't move Claude seats between accounts.", view());
   }
+  let inherited: { effective: string; selected: string | null } | undefined;
+  if (input.inheritConfigDir) {
+    if (!relaunch.inheritedConfigDir) return refuse("rebind_unsupported_for_runtime", "The inherited config selection is unavailable. Nothing changed.", view());
+    inherited = relaunch.inheritedConfigDir(seat.nodeId);
+    if (path.resolve(inherited.effective) !== dir) return refuse("invalid_config_dir", "The inherited config dir changed after this undo command was prepared. Nothing changed.", view());
+  }
   if (!claudeConfigDirPresent(dir)) return refuse("config_dir_missing", `${dir} doesn't exist or isn't a directory, so there's no account there to move to. Nothing changed.`, view());
   if (!seat.running) {
     return refuse("seat_not_running", `${input.seat} isn't running, so there's no conversation to resume. Launch it first: rig launch ${seat.rigName} ${seat.logicalId}.`, view());
   }
-  if (path.resolve(relaunch.configDir(seat.nodeId).effective) === dir) {
+  const current = relaunch.configDir(seat.nodeId);
+  if (input.inheritConfigDir ? current.declared === null : path.resolve(current.effective) === dir) {
     return refuse("already_on_config_dir", `${input.seat} already runs on ${dir}. Nothing changed.`, view());
   }
   const own = relaunch.tokenRef(seat.nodeId);
@@ -92,14 +102,15 @@ async function checkConfigDirMove(input: ProviderPrecheckInput, dirInput: string
     return refuse("credential_outranks_token", "Claude Code would use these instead of the account's stored login, so nothing changed: "
       + `${outranking.map((c) => `${c.name} (${c.source}; ${c.remedy})`).join("; ")}.`, view({ checked, notChecked: found.notChecked }));
   }
-  const login = await probe(dir);
+  const login = await probe(dir, inherited ? { selected: inherited.selected } : undefined);
   if (login.state === "not_logged_in") {
     return refuse("config_dir_not_logged_in", `${dir} holds no Claude login (claude auth status reports none). Sign in there first (CLAUDE_CONFIG_DIR=${shellQuote(dir)} claude auth login). Nothing changed.`, view({ checked, notChecked: found.notChecked }));
   }
   if (login.state === "unreadable") {
     return refuse("config_dir_login_unreadable", `${dir}'s login couldn't be confirmed (${login.reason}: ${login.detail}), so the seat isn't moved onto it. Nothing changed.`, view({ checked, notChecked: found.notChecked }));
   }
-  return { ok: true, verdict: { safe: true, claude: view({ checked, notChecked: found.notChecked }) }, ref: null, instead: null, configDir: dir };
+  return { ok: true, verdict: { safe: true, claude: view({ checked, notChecked: found.notChecked }) }, ref: null, instead: null, configDir: dir,
+    ...(inherited ? { inheritedConfigDir: inherited } : {}) };
 }
 
 /** Move one Claude seat in its own pane, by restore's own resume path: under the seat's lifecycle lease, a snapshot taken
@@ -150,7 +161,13 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
     return { outcome: "failed_safely", reasons: ["conversation_not_resumable"],
       message: `Snapshot ${snapshot.snapshotId} ${snapshot.why}, so relaunching ${input.seat} wouldn't resume its conversation. Nothing changed.` };
   }
-  if (checked.configDir !== undefined) return moveConfigDir(input, relaunch, seat, snapshot, checked.configDir, touching);
+  if (checked.configDir !== undefined) {
+    if (!relaunch.canResumeInConfigDir?.(nodeId, checked.configDir, snapshot.conversation)) {
+      return { outcome: "failed_safely", reasons: ["config_dir_conversation_unavailable"],
+        message: "The target config dir does not reach the same native conversation file. The seat is still running and nothing changed." };
+    }
+    return moveConfigDir(input, relaunch, seat, snapshot, checked.configDir, touching, checked.inheritedConfigDir);
+  }
   const before = relaunch.tokenRef(nodeId);
   const account = checked.ref?.label ?? STORED_LOGIN;
   const report: SeatSwitchReport = { seat: input.seat, account, ...(checked.ref ? { tokenFile: checked.ref.tokenFile } : {}),
@@ -202,14 +219,22 @@ async function switchHeld(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaun
 /** The move itself, after every check passed and a snapshot that resumes the seat was taken: the seat's own `CLAUDE_CONFIG_DIR` is
  *  set to the account's dir, then the seat is relaunched in its pane from that snapshot, the same path a token move takes. */
 async function moveConfigDir(input: ProviderSwitchInput, relaunch: ClaudeSeatRelaunch, seat: ClaudeSeat,
-  snapshot: { snapshotId: string; conversation: string | null }, dir: string, touching: () => void): Promise<ProviderSwitchResult> {
+  snapshot: { snapshotId: string; conversation: string | null }, dir: string, touching: () => void,
+  inherited?: { effective: string; selected: string | null }): Promise<ProviderSwitchResult> {
   const { nodeId, rigName, logicalId } = seat;
   const before = relaunch.configDir!(nodeId);
+  if (input.inheritConfigDir) {
+    const current = relaunch.inheritedConfigDir?.(nodeId);
+    if (!inherited || !current || current.selected !== inherited.selected || path.resolve(current.effective) !== path.resolve(inherited.effective)) {
+      return { outcome: "failed_safely", reasons: ["invalid_config_dir"], message: "The inherited config selection changed during precheck. Nothing changed." };
+    }
+  }
   const report: SeatSwitchReport = { seat: input.seat, account: input.toAccount, configDir: dir, conversation: snapshot.conversation, loginChanged: false, peers: [],
+    ...(input.inheritConfigDir ? { configDirInherited: true } : {}),
     // The way back names the dir the seat ran on, declared or not, so it works for a seat that declared nothing.
-    undo: `rig provider switch --seat ${input.seat} --config-dir ${shellQuote(before.effective)}` };
+    undo: `rig provider switch --seat ${input.seat} --config-dir ${shellQuote(before.effective)}${before.declared === null ? " --inherit-config-dir" : ""}` };
   // A write that fails changed nothing and the seat's process wasn't touched, so it reads as unchanged (the caller's catch).
-  relaunch.setConfigDir!(nodeId, dir);
+  relaunch.setConfigDir!(nodeId, input.inheritConfigDir ? null : dir);
   touching();
   let relaunched: Awaited<ReturnType<ClaudeSeatRelaunch["relaunchInPane"]>>;
   try { relaunched = await relaunch.relaunchInPane(seat.rigId, logicalId, snapshot.snapshotId); }
@@ -239,9 +264,18 @@ async function moveConfigDir(input: ProviderSwitchInput, relaunch: ClaudeSeatRel
 /** The seat's config-dir hooks over its stored env, as the route wires them. `declared` is the MEMBER's own `CLAUDE_CONFIG_DIR` (null
  *  when it declares none), because that is what a rollback writes back into the member's env; a dir only the rig declares is not the
  *  member's, and restoring it there would shadow the rig. `effective` is the dir the seat resolves to, wherever it is declared. */
-export function claudeSeatConfigDirHooks(rigRepo: Pick<RigRepository, "db" | "setNodeEnvVar">): Pick<ClaudeSeatRelaunch, "configDir" | "setConfigDir"> {
+export function claudeSeatConfigDirHooks(rigRepo: Pick<RigRepository, "db" | "setNodeEnvVar">): Pick<ClaudeSeatRelaunch, "configDir" | "setConfigDir" | "inheritedConfigDir" | "canResumeInConfigDir"> {
   return {
     configDir: (nodeId) => ({ declared: memberRuntimeHome(rigRepo.db, nodeId, "claude-code"), effective: claudeConfigRootFor(rigRepo.db, nodeId) }),
+    // What the seat would use with its own (member) setting removed: the rig's, else the process's, else Claude's native default.
+    // `selected` is null when nothing selects one (native unset), so an undo can restore "unset" rather than pin a path (T3 652bdcf7f).
+    inheritedConfigDir: (nodeId) => {
+      const home = seatRuntimeHome(rigRepo.db, nodeId, "claude-code", { ignoreMember: true });
+      const selected = home.home ?? process.env.CLAUDE_CONFIG_DIR ?? null;
+      return { effective: selected ?? path.join(os.homedir(), ".claude"), selected };
+    },
+    // A resume looks for the conversation under the TARGET dir's projects/ (verified on 2.1.312, see the commit message).
+    canResumeInConfigDir: (nodeId, dir, conversation) => claudeConfigDirsShareConversation(claudeConfigRootFor(rigRepo.db, nodeId), dir, conversation),
     // The seat's own (member) env, which restore, launch and handover all read through getEffectiveSeatEnv.
     setConfigDir: (nodeId, dir) => {
       if (!rigRepo.setNodeEnvVar(nodeId, "CLAUDE_CONFIG_DIR", dir)) throw Object.assign(new Error("the seat's env couldn't be written"), { code: "seat_env_unwritable" });

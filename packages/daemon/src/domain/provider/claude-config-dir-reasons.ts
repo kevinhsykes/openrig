@@ -6,4 +6,5 @@ export type ClaudeConfigDirPrecheckReason =
   | "config_dir_not_logged_in" // `claude auth status` for the target config dir reports no login
   | "config_dir_login_unreadable" // the target's login couldn't be read, or isn't a claude.ai subscription login
   | "already_on_config_dir" // the seat already runs on that config dir
+  | "config_dir_conversation_unavailable" // target does not reach the same native transcript
   | "seat_has_token_reference"; // the seat's own token would outrank the target dir's login: move it back to the stored login first
