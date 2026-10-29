@@ -590,7 +590,7 @@ export function getNodeInventory(db: Database.Database, rigId: string): NodeInve
   // for the rig (was a query per node inside the rows.map). rig-scoped restore
   // map = the prior WHERE rig_id=? filter; oriented map is node-scoped/global.
   const restoreOutcomes = buildRestoreOutcomeMap(db, rigId);
-  const orienteds = buildOrientedMap(db);
+  const orienteds = buildOrientedMap(db, rigId);
   const codexDaemonOptOuts = new AppliedLaunchObservationStore(db).readCurrentDaemonOptOuts();
 
   const rows = queryInventoryRows(db, rigId);
@@ -1379,23 +1379,32 @@ export function deriveCanonicalFromEntry(entry: NodeInventoryEntry): string | nu
   return deriveCanonicalSessionName(pod, member, entry.rigName);
 }
 
-export function readAssignedWorkBySession(db: Database.Database): Map<string, AssignedWorkCounts> {
-  const rows = db.prepare(`
+/** The active-work count by destination. The planner picks idx_queue_items_state for the state filter, which costs one
+ * table read per active row; on a cold cache that is hundreds of random page reads per call (P23: ~50 ms measured per
+ * GET /nodes, once per rig). idx_queue_items_destination_state (migration 024) holds both columns, so scanning it needs no
+ * table read at all. Exported so a test can pin the plan. */
+export const ASSIGNED_WORK_SQL = (hint: string) => `
     SELECT destination_session,
       COUNT(*) as assigned_count,
       SUM(CASE WHEN state = 'pending' THEN 1 ELSE 0 END) as pending_count,
       SUM(CASE WHEN state = 'in-progress' THEN 1 ELSE 0 END) as in_progress_count,
       SUM(CASE WHEN state = 'blocked' THEN 1 ELSE 0 END) as blocked_count
-    FROM queue_items
+    FROM queue_items ${hint}
     WHERE state IN ('pending', 'in-progress', 'blocked')
     GROUP BY destination_session
-  `).all() as Array<{
-    destination_session: string;
-    assigned_count: number;
-    pending_count: number;
-    in_progress_count: number;
-    blocked_count: number;
-  }>;
+  `;
+export const ASSIGNED_WORK_COVERING_HINT = "INDEXED BY idx_queue_items_destination_state";
+
+export function readAssignedWorkBySession(db: Database.Database): Map<string, AssignedWorkCounts> {
+  type Row = { destination_session: string; assigned_count: number; pending_count: number; in_progress_count: number; blocked_count: number };
+  let rows: Row[];
+  try {
+    rows = db.prepare(ASSIGNED_WORK_SQL(ASSIGNED_WORK_COVERING_HINT)).all() as Row[];
+  } catch (err) {
+    // A database without that index (a curated or very old read model) still answers, by the planner's own plan.
+    if (!/no such index/i.test(String((err as Error).message))) throw err;
+    rows = db.prepare(ASSIGNED_WORK_SQL("")).all() as Row[];
+  }
   const out = new Map<string, AssignedWorkCounts>();
   for (const r of rows) {
     const address = physicalSessionName(db, r.destination_session);

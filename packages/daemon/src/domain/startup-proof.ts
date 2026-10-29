@@ -276,10 +276,15 @@ export function deriveOriented(db: Database.Database, nodeId: string): NodeOrien
  * identical verdict. Nodes with no proof events are simply absent (caller
  * defaults to "n-a", matching the no-challenge branch).
  */
-export function buildOrientedMap(db: Database.Database): Map<string, NodeOriented> {
-  const rows = db.prepare(
-    "SELECT node_id, type, payload, seq FROM events WHERE type IN ('node.startup_challenged','node.startup_proof_skipped','node.startup_proof_verified','node.startup_proof_rejected') ORDER BY node_id, seq DESC"
-  ).all() as Array<{ node_id: string; type: string; payload: string; seq: number }>;
+export function buildOrientedMap(db: Database.Database, rigId?: string): Map<string, NodeOriented> {
+  // Given a rig, only that rig's nodes are read. The fold is per node, so each node's value is the same either way; what
+  // changes is the read: every proof event of every rig is one random events-table read each (P23: ~65-105 ms per call
+  // measured on a cold cache, once per rig), and a single-rig inventory used only its own rows.
+  const proofTypes = "'node.startup_challenged','node.startup_proof_skipped','node.startup_proof_verified','node.startup_proof_rejected'";
+  const rows = (rigId === undefined
+    ? db.prepare(`SELECT node_id, type, payload, seq FROM events WHERE type IN (${proofTypes}) ORDER BY node_id, seq DESC`).all()
+    : db.prepare(`SELECT node_id, type, payload, seq FROM events WHERE type IN (${proofTypes}) AND node_id IN (SELECT id FROM nodes WHERE rig_id = ?) ORDER BY node_id, seq DESC`).all(rigId)
+  ) as Array<{ node_id: string; type: string; payload: string; seq: number }>;
   const byNode = new Map<string, OrientedEventRow[]>();
   for (const r of rows) {
     let list = byNode.get(r.node_id);
