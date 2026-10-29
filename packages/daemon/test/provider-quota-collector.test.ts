@@ -363,6 +363,63 @@ describe("one read of the file per refresh", () => {
     await c.refreshAll();
     expect(c.summary()).toMatchObject({ state: "unavailable", reason: expect.stringContaining("file_too_large") });
   });
+  // P28c (qwen on 676dc99fe, finding 1): the handle is released on every way the read can end, not only on success. FileHandle.fd is -1
+  // once it is closed, so a handle that stayed open would show its descriptor here.
+  describe("the file handle is released on every failure path", () => {
+    const track = () => {
+      const handles: fs.promises.FileHandle[] = [];
+      const open = fs.promises.open.bind(fs.promises);
+      vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => { const h = await open(...args); handles.push(h); return h; });
+      return handles;
+    };
+    it("an error thrown by the stream itself (not a size or deadline error)", async () => {
+      const handles: fs.promises.FileHandle[] = [];
+      const c = new QuotaCollectorUsage({ file: fileWith(FIXTURE), rails: RAILS, now: () => FRESH_NOW });
+      const real = fs.promises.open;
+      vi.spyOn(fs.promises, "open").mockImplementation(async (...args) => {
+        const h = await (real as unknown as (...a: unknown[]) => Promise<fs.promises.FileHandle>)(...args);
+        handles.push(h);
+        vi.spyOn(h, "createReadStream").mockImplementation((() => (async function* () { throw Object.assign(new Error("boom"), { code: "EIO" }); })()) as never);
+        return h;
+      });
+      await c.refreshAll();
+      expect(c.summary()).toMatchObject({ state: "unavailable", reason: expect.stringContaining("file_unreadable") });
+      expect(handles).toHaveLength(1);
+      expect(handles[0]!.fd).toBe(-1);
+    });
+    it("a size overrun found mid-stream", async () => {
+      const file = fileWith(FIXTURE);
+      const handles = track();
+      const open = fs.promises.open as unknown as { getMockImplementation(): (...a: unknown[]) => Promise<fs.promises.FileHandle> };
+      const inner = open.getMockImplementation();
+      vi.spyOn(fs.promises, "open").mockImplementation((async (...args: unknown[]) => {
+        const h = await inner(...args);
+        const stat = h.stat.bind(h);
+        vi.spyOn(h, "stat").mockImplementation((async () => { const before = await stat(); fs.appendFileSync(file, " ".repeat(QUOTA_FILE_MAX_BYTES)); return before; }) as typeof h.stat);
+        return h;
+      }) as never);
+      const c = new QuotaCollectorUsage({ file, rails: RAILS, now: () => FRESH_NOW });
+      await c.refreshAll();
+      expect(c.summary()).toMatchObject({ reason: expect.stringContaining("file_too_large") });
+      expect(handles.every((h) => h.fd === -1) && handles.length >= 1).toBe(true);
+    });
+    it("a path that is not a regular file", async () => {
+      const handles = track();
+      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "quota-collector-dir-"));
+      cleanup.push(() => fs.rmSync(dir, { recursive: true, force: true }));
+      const c = new QuotaCollectorUsage({ file: dir, rails: RAILS, now: () => FRESH_NOW });
+      await c.refreshAll();
+      expect(c.summary().state).toBe("unavailable");
+      expect(handles.every((h) => h.fd === -1)).toBe(true);
+    });
+    it("a successful read", async () => {
+      const handles = track();
+      await new QuotaCollectorUsage({ file: fileWith(FIXTURE), rails: RAILS, now: () => FRESH_NOW }).refreshAll();
+      expect(handles).toHaveLength(1);
+      expect(handles[0]!.fd).toBe(-1);
+    });
+  });
+
   it("refreshing every rail reads the file once, and a single rail's refresh reads it once", async () => {
     const c = collector(FIXTURE);
     const spy = vi.spyOn(fs.promises, "open");

@@ -1,5 +1,5 @@
-import { afterEach, describe, expect, it } from "vitest";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, linkSync } from "node:fs";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import fs, { chmodSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, symlinkSync, linkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { claudeAuthReaderEnv, type ClaudeAuthReader } from "../src/domain/provider/claude-auth-status-reader.js";
@@ -37,6 +37,35 @@ describe("native conversation visibility across config dirs", () => {
     rmSync(path.join(project, `${token}.jsonl`));
     mkdirSync(path.join(project, `${token}.jsonl`));
     expect(claudeConfigDirsShareConversation(source, target, token)).toBe(false);
+  });
+});
+
+describe("the conversation gate fails closed on a stat or listing error (P28c, qwen finding 2)", () => {
+  // A permission error, or a file removed between the search and the stat, is a refusal like any other missing conversation: the
+  // gate never throws and never answers true when it could not look. The refusal reason stays `config_dir_conversation_unavailable`,
+  // "the target does not reach the same native transcript"; it deliberately does not say which of the two causes it was.
+  it("returns false, and does not throw, when the shared project directory cannot be read or statted", () => {
+    const source = path.join(tmp(), "source"), target = path.join(tmp(), "target");
+    const token = "22222222-2222-4222-8222-222222222222";
+    const project = path.join(source, "projects", "fixture");
+    mkdirSync(project, { recursive: true });
+    mkdirSync(target);
+    writeFileSync(path.join(project, `${token}.jsonl`), "{}\n");
+    symlinkSync(path.join(source, "projects"), path.join(target, "projects"), "dir");
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(true);   // the healthy arm: sharing is detected
+    cleanup.unshift(() => { try { chmodSync(project, 0o755); } catch { /* already removed */ } });   // first, so the temp dir can be removed
+    chmodSync(project, 0o000);
+    expect(() => claudeConfigDirsShareConversation(source, target, token)).not.toThrow();
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(false);
+    chmodSync(project, 0o755);
+    expect(claudeConfigDirsShareConversation(source, target, token)).toBe(true);
+    // The search finds the transcript, then the stat of it fails (removed or unreadable in between): the catch decides, and it refuses.
+    const realStat = fs.statSync;
+    const spy = vi.spyOn(fs, "statSync").mockImplementation(((p: string, ...rest: unknown[]) => {
+      if (String(p).endsWith(`${token}.jsonl`)) throw Object.assign(new Error("EACCES"), { code: "EACCES" });
+      return (realStat as (...a: unknown[]) => unknown)(p, ...rest);
+    }) as never);
+    try { expect(claudeConfigDirsShareConversation(source, target, token)).toBe(false); } finally { spy.mockRestore(); }
   });
 });
 

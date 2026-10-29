@@ -61,6 +61,16 @@ describe("rig provider status shows collector-fed rails", () => {
     expect(JSON.parse(json.out)).toEqual(model);
     expect(json.out).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
   });
+  // P28c (qwen finding 3): JSON.stringify escapes U+0000-U+001F itself; the CLI escapes U+007F-U+009F, which it leaves raw. Every one
+  // of those code points, in a field the collector file controls, must reach the output as an escape and parse back to itself.
+  it("escapes every control code point in JSON evidence and parses back to the same value", async () => {
+    const all = Array.from({ length: 0xa0 }, (_, i) => String.fromCharCode(i)).join("");
+    const model = structuredClone(MODEL);
+    model.usage[0]!.identity = { ...model.usage[0]!.identity!, source: `a${all}z` };
+    const json = await run(["status", "--json"], model);
+    expect(json.out).not.toMatch(/[\x00-\x1f\x7f-\x9f]/);
+    expect(JSON.parse(json.out)).toEqual(model);
+  });
   it("names each rail window with its rail, the file's own source string and that it is advisory, and shows no Codex-shaped fields", async () => {
     const { out, exitCode } = await run(["status"], MODEL);
     expect(exitCode).toBeUndefined();
