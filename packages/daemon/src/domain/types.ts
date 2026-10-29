@@ -33,6 +33,8 @@ export interface Node {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  /** P25: what the spec asked for by rail (`rail:minimax`); then `model` is the last resolved launch value, NULL before the first launch. */
+  modelRequest?: string | null;
   effort?: string | null;
   /** Session-scoped Claude Advisor model; never written to shared Claude settings. */
   advisor?: string | null;

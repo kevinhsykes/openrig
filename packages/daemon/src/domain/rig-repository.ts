@@ -1113,6 +1113,7 @@ export class RigRepository {
       role: row.role,
       runtime: row.runtime,
       model: row.model,
+      modelRequest: row.model_request ?? null,
       effort: row.effort ?? null,
       advisor: row.advisor ?? null,
       effortChoice: row.effort_choice ?? null,
@@ -1207,6 +1208,7 @@ interface NodeRow {
   role: string | null;
   runtime: string | null;
   model: string | null;
+  model_request?: string | null;
   effort?: string | null;
   advisor?: string | null;
   effort_choice?: string | null;

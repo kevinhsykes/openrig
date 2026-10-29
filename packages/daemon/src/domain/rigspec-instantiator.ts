@@ -116,6 +116,8 @@ export class RigInstantiator {
         if (opts?.nonInterruptive !== undefined) this.rigRepo.setRigNonInterruptive(rig.id, opts.nonInterruptive);
 
         for (const specNode of spec.nodes) {
+          const unwired = unwiredModelRequestError(specNode.id, specNode.modelRequest);
+          if (unwired) throw new Error(unwired);
           const node = this.rigRepo.addNode(rig.id, specNode.id, {
             role: specNode.role,
             runtime: specNode.runtime,
@@ -338,6 +340,13 @@ import { claudeSeatSkillsNote, ensureSeatSkillPlugin, seatCatalogKeptNote, migra
 import { carrySeatLaunchAdditions, prepareSeatLaunchAdditions, type SeatLaunchAdditionsCarry } from "./seat-launch-additions.js";
 import type { SystemWorldResolution } from "./system-world.js";
 import type { SeatEnv } from "./seat-env.js";
+
+/** P25: until a launch resolves a rail request into a model (materializeNodeModel), a seat that asks for its model by rail must
+ *  not be created: the launch would use a profile or default model instead of the one asked for, and say nothing. */
+function unwiredModelRequestError(who: string, request: string | undefined): string | null {
+  return request === undefined ? null
+    : `${who}: asks for its model by rail (${request}), and this daemon cannot launch a rail request yet; name a model, or wait for the rail resolver to be installed. Nothing was created.`;
+}
 
 /** OPR.0.7.0.13: the constant seat-skills pointer, merged into the project's managed guidance for a Codex seat. It
  *  names no seat, path or skill, so pod-mates share one identical block, and it tells a non-OpenRig agent it doesn't
@@ -1661,6 +1670,10 @@ export class PodRigInstantiator {
           continue;
         }
 
+        {
+          const unwired = unwiredModelRequestError(qualifiedId, member.modelRequest);
+          if (unwired) { nodeResults.push({ logicalId: qualifiedId, status: "failed", error: unwired }); continue; }
+        }
         // Create node
         const createUnit = this.db.transaction(() => {
           const node = this.deps.rigRepo.addNode(rigId, qualifiedId, {
@@ -1972,6 +1985,10 @@ export class PodRigInstantiator {
     recordCreated?: RecordCreated,
   ): Promise<{ logicalId: string; status: "launched" | "failed"; code?: string; error?: string }> {
     const effectiveCwd = resolveLaunchCwd(member.cwd, rigRoot, cwdOverride);
+    {
+      const unwired = unwiredModelRequestError(qualifiedId, member.modelRequest);
+      if (unwired) return { logicalId: qualifiedId, status: "failed", error: unwired };
+    }
     // Create node with sentinel values
     let nodeId: string;
     try {
@@ -2051,6 +2068,8 @@ export class PodRigInstantiator {
     rigSpec: PodRigSpec;
     cwdOverride?: string;
   }) {
+    const unwired = unwiredModelRequestError(input.qualifiedId, input.member.modelRequest);
+    if (unwired) throw new Error(unwired);
     const effectiveCwd = resolveLaunchCwd(input.member.cwd, input.rigRoot, input.cwdOverride);
     // Export and snapshot can run before launch. Resolve inherited Advisor values
     // during creation; launch still re-resolves the original spec for later edits.

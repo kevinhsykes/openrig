@@ -159,6 +159,7 @@ export class RigSpecCodec {
         if (m.label) member["label"] = m.label;
         if (m.codexConfigProfile) member["codex_config_profile"] = m.codexConfigProfile;
         if (m.model) member["model"] = m.model;
+        else if (m.modelRequest) member["model"] = m.modelRequest;   // P25: the request, never a resolved id
         if (m.effort) member["effort"] = m.effort;
         if (m.advisor) member["advisor"] = m.advisor;
         // OPR.0.4.6.FAC1: role round-trips through spec serialization.
@@ -244,6 +245,7 @@ export class LegacyRigSpecCodec {
         const n: Record<string, unknown> = { id: node.id, runtime: node.runtime };
         if (node.role != null) n["role"] = node.role;
         if (node.model != null) n["model"] = node.model;
+        else if (node.modelRequest) n["model"] = node.modelRequest;
         if (node.effort != null) n["effort"] = node.effort;
         if (node.advisor != null) n["advisor"] = node.advisor;
         if (node.claudePermissions !== undefined) n["claude_permissions"] = node.claudePermissions;
