@@ -8,6 +8,7 @@
 //   - bounded: a hard timeout and a per-seat result cache, so a create stays fast on a starved host;
 //   - fail open: a missing, slow, crashing or unreadable hook yields no warning and no block, only a debug line.
 import { execFile } from "node:child_process";
+import { hookChildEnv } from "./hook-child-env.js";
 
 export interface DestinationCheckConfig {
   /** argv template; `{session}` is replaced by the destination session name. */
@@ -71,7 +72,7 @@ export function destinationCheckConfigFromEnv(env: NodeJS.ProcessEnv = process.e
 export const execFileHook: RunHook = (argv, timeoutMs) =>
   new Promise((resolve) => {
     const [file, ...args] = argv;
-    execFile(file!, args, { timeout: timeoutMs, maxBuffer: 64 * 1024, encoding: "utf8", windowsHide: true, killSignal: "SIGKILL" }, (error, stdout) => {
+    execFile(file!, args, { timeout: timeoutMs, maxBuffer: 64 * 1024, encoding: "utf8", windowsHide: true, killSignal: "SIGKILL", env: hookChildEnv() }, (error, stdout) => {
       if (!error) return resolve({ code: 0, stdout, timedOut: false });
       const e = error as NodeJS.ErrnoException & { killed?: boolean; code?: number | string };
       if (e.killed) return resolve({ code: null, stdout: stdout ?? "", timedOut: true });
