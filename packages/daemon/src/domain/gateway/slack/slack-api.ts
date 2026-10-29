@@ -74,6 +74,43 @@ export interface WebApiResult {
   grantedScopes: string[]; // parsed from x-oauth-scopes response header (item 5)
   json: Record<string, unknown>;
   error?: string;
+  /** P41: set only for a transport failure (no HTTP status): the underlying error code, and whether the request provably never
+   *  reached Slack, so repeating it cannot post twice. */
+  transport?: { code: string | null; preSend: boolean };
+}
+
+/** P41: failures of the CONNECT phase. The request was not sent, so a retry cannot double-post. Response-phase failures (a
+ *  timeout waiting for the answer, a reset, a headers timeout, our own abort) are NOT here: Slack may have received the message. */
+const PRE_SEND_CODES = new Set(["UND_ERR_CONNECT_TIMEOUT", "ECONNREFUSED", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH"]);
+
+const clean = (text: string, max: number): string => text.replace(/[\x00-\x1f\x7f-\x9f]/g, " ").replace(/\s+/g, " ").trim().slice(0, max);
+
+/** P41: what fetch really failed with. Node's fetch throws `TypeError: fetch failed` and puts the cause (a timeout, a DNS error, a
+ *  TLS error) in `error.cause`, which the stored message used to drop: a connect timeout, a DNS failure and a bad certificate all read
+ *  "fetch failed". Walks the cause chain (3 deep) and an AggregateError's members, bounded and stripped of control characters. */
+export function describeTransportError(e: unknown): { message: string; code: string | null; preSend: boolean } {
+  const base = e instanceof Error ? e.message : String(e);
+  const parts: string[] = [];
+  const codes: string[] = [];
+  let current: unknown = e instanceof Error ? e.cause : undefined;
+  for (let depth = 0; depth < 3 && current !== undefined && current !== null; depth++) {
+    const err = current as { code?: unknown; message?: unknown; cause?: unknown; errors?: unknown };
+    const code = typeof err.code === "string" ? err.code : null;
+    const message = typeof err.message === "string" ? err.message : "";
+    if (code) codes.push(code);
+    if (Array.isArray(err.errors)) {
+      for (const member of err.errors.slice(0, 3)) {
+        const memberCode = (member as { code?: unknown })?.code;
+        if (typeof memberCode === "string") codes.push(memberCode);
+      }
+    }
+    if (code || message) parts.push(clean(`${code ?? ""}${code && message ? ": " : ""}${message}`, 160));
+    current = err.cause;
+  }
+  const code = codes[0] ?? null;
+  const detail = parts.length > 0 ? ` (cause: ${[...new Set(parts)].join("; ")})` : "";
+  const preSend = codes.length > 0 && codes.every((c) => PRE_SEND_CODES.has(c));
+  return { message: clean(`${base}${detail}`, 400), code, preSend };
 }
 
 /** S10 shape-fix — the per-method REQUEST SHAPE. Slack's read methods (conversations.info /
@@ -147,7 +184,8 @@ export async function callWebApi(
         ...(Number.isFinite(retryAfter) && retryAfter > 0 ? { retryAfterSeconds: retryAfter } : {}), error: ok ? undefined : String(json.error ?? `http ${res.status}`) };
     });
   } catch (e) {
-    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${(e as Error).message}` };
+    const described = describeTransportError(e);
+    return { ok: false, status: 0, grantedScopes: [], json: {}, error: `web-api transport: ${described.message}`, transport: { code: described.code, preSend: described.preSend } };
   }
 }
 
@@ -423,6 +461,9 @@ export type PostChatMessageResult =
  *  long rate-limit windows, not this call. */
 const MAX_POST_RATE_LIMIT_WAIT_MS = 10_000;
 
+/** P41: a post whose CONNECT failed (nothing was sent) is repeated once after this pause, before the stuck sweep ever sees it. */
+const POST_TRANSPORT_RETRY_BACKOFF_MS = 1_500;
+
 /** S10 — outbound posting via the Web API (`chat.postMessage`). The R2 native shape needs
  *  thread_ts, which an incoming webhook cannot carry — the webhook path retires with the relay.
  *  A1.2 identity rail: this function NEVER accepts per-message `username`/`icon_*` overrides —
@@ -445,6 +486,10 @@ export async function postChatMessage(
       await sleep(waitMs);
       r = await callWebApi("chat.postMessage", token, body, fetchImpl, timeoutMs);
     }
+  }
+  if (!r.ok && r.transport?.preSend) {
+    await sleep(POST_TRANSPORT_RETRY_BACKOFF_MS);
+    r = await callWebApi("chat.postMessage", token, body, fetchImpl, timeoutMs);
   }
   if (!r.ok) return { ok: false, status: r.status, error: r.error };
   const ts = typeof r.json.ts === "string" ? r.json.ts.trim() : "";
