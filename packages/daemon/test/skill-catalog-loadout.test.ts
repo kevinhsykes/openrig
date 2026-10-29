@@ -3,7 +3,7 @@ import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { reconcileSkillLoadout, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "../src/domain/skill-catalog.js";
+import { readLoadoutOwners, reconcileSkillLoadout, resolvePluginSkills, resolveSkillLoadout, type SkillLoadout } from "../src/domain/skill-catalog.js";
 
 const roots: string[] = [];
 
@@ -911,6 +911,115 @@ describe("plugin skills in the managed loadout", () => {
       const result = reader();
       expect(result.errors).toEqual([]);
       expect(result.receipts.map((r) => [r.id, r.status])).toEqual([["delegating-work", "current"], ["queue-handoff", "current"]]);
+    });
+  });
+
+  // P37b: a kept selection whose owner seat has no live node is ORPHANED. It is reported; `releaseOrphaned` (explicit, never default)
+  // drops it and refreshes the copy from the installed plugin. A live or unknown owner is never touched.
+  describe("orphaned owners (P37b)", () => {
+    const ORPHAN = { "seat-a": { state: "orphaned" as const, reason: "no node for seat-a (superseded)" } };
+    const setup = (extraOwner = false) => {
+      const f = fixture([]);
+      const plugin = writePlugin(f.root, [".claude-plugin"], ["queue-handoff", "delegating-work"]);
+      const entries = (ids?: string[]) => loadoutOf(resolvePluginSkills({ pluginId: "core", pluginRoot: plugin, runtime: "claude-code" }).entries
+        .filter((e) => !ids || ids.includes(e.id)), f.root);
+      expect(reconcileSkillLoadout({ loadout: entries(), runtime: "claude-code", cwd: f.project, topologyOwner: "seat-a", apply: true }).ok).toBe(true);
+      if (extraOwner) expect(reconcileSkillLoadout({ loadout: entries(["queue-handoff"]), runtime: "claude-code", cwd: f.project, topologyOwner: "seat-c", apply: true }).ok).toBe(true);
+      const refresh = (version = "2.0.0") => {
+        writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "core", version, skills: "./skills" }));
+        writeSkill(join(plugin, "skills"), "queue-handoff", "queue-handoff", "# newer plugin bytes\n");
+      };
+      const reader = (extra: Partial<Parameters<typeof reconcileSkillLoadout>[0]> = {}) =>
+        reconcileSkillLoadout({ loadout: loadoutOf([], f.root), runtime: "claude-code", cwd: f.project, topologyOwner: "seat-b", ...extra });
+      const manifest = () => JSON.parse(readFileSync(join(f.project, ".openrig", "skill-loadouts", "claude-code.json"), "utf8")) as {
+        topologySelections: Record<string, string[]>; skills: Array<{ id: string; revision: string }>; releases?: Array<Record<string, unknown>>;
+      };
+      const copy = () => readFileSync(join(f.project, ".claude", "skills", "queue-handoff", "SKILL.md"), "utf8");
+      return { f, refresh, reader, manifest, copy };
+    };
+
+    it("reports an orphaned owner with its reason and skills, and says so in each kept receipt", () => {
+      const { refresh, reader } = setup();
+      refresh();
+      const result = reader({ ownerLiveness: ORPHAN });
+      expect(result.orphanedOwners).toEqual([{ owner: "seat-a", reason: "no node for seat-a (superseded)", skills: ["delegating-work", "queue-handoff"] }]);
+      const kept = result.receipts.find((r) => r.id === "queue-handoff")!;
+      expect(kept.detail).toMatch(/kept for seat-a, whose seat is not live \(no node for seat-a \(superseded\)\)/);
+      expect(kept.detail).toMatch(/--release-orphaned/);
+      expect(result.releasedOwners).toBeUndefined();
+    });
+
+    it("reports nothing for a live or unknown owner, or when liveness was not asked", () => {
+      const { reader } = setup();
+      expect(reader({ ownerLiveness: { "seat-a": { state: "live" } } }).orphanedOwners).toBeUndefined();
+      expect(reader({ ownerLiveness: { "seat-a": { state: "unknown", reason: "could not tell" } } }).orphanedOwners).toBeUndefined();
+      expect(reader().orphanedOwners).toBeUndefined();
+    });
+
+    it("without the flag nothing is released, even for an orphan, and --apply changes nothing", () => {
+      const { refresh, reader, manifest, copy } = setup();
+      refresh();
+      const before = JSON.stringify(manifest());
+      reader({ ownerLiveness: ORPHAN, apply: true });
+      expect(JSON.stringify(manifest())).toBe(before);
+      expect(copy()).not.toContain("newer plugin bytes");
+    });
+
+    it("a release plan (no --apply) names what would change and writes nothing", () => {
+      const { refresh, reader, manifest, copy } = setup();
+      refresh();
+      const before = JSON.stringify(manifest());
+      const plan = reader({ ownerLiveness: ORPHAN, releaseOrphaned: { by: "lead", at: "2026-10-29T02:00:00.000Z" } });
+      expect(plan.applied).toBe(false);
+      expect(plan.releasedOwners).toEqual([{ owner: "seat-a", skills: ["delegating-work", "queue-handoff"], at: "2026-10-29T02:00:00.000Z", by: "lead", reason: "no node for seat-a (superseded)" }]);
+      expect(plan.receipts.find((r) => r.id === "queue-handoff")).toMatchObject({ status: "stale", revision: "plugin:core@2.0.0" });
+      expect(JSON.stringify(manifest())).toBe(before);
+      expect(copy()).not.toContain("newer plugin bytes");
+    });
+
+    it("--apply with the release drops the owner, refreshes the copy from the installed plugin and records who released it", () => {
+      const { refresh, reader, manifest, copy } = setup();
+      refresh();
+      const done = reader({ ownerLiveness: ORPHAN, releaseOrphaned: { by: "lead", at: "2026-10-29T02:00:00.000Z" }, apply: true });
+      expect(done).toMatchObject({ ok: true, applied: true, errors: [] });
+      expect(copy()).toContain("newer plugin bytes");
+      const m = manifest();
+      expect(m.topologySelections["seat-a"]).toBeUndefined();
+      expect(m.skills.map((k) => [k.id, k.revision])).toEqual([["delegating-work", "plugin:core@2.0.0"], ["queue-handoff", "plugin:core@2.0.0"]]);
+      expect(m.releases).toEqual([{ owner: "seat-a", skills: ["delegating-work", "queue-handoff"], at: "2026-10-29T02:00:00.000Z", by: "lead", reason: "no node for seat-a (superseded)" }]);
+    });
+
+    it("never touches a live owner's selection, and a live co-owner keeps its own", () => {
+      const { refresh, reader, manifest } = setup(true);
+      refresh();
+      const liveness = { ...ORPHAN, "seat-c": { state: "live" as const } };
+      reader({ ownerLiveness: liveness, releaseOrphaned: { by: "lead" }, apply: true });
+      const m = manifest();
+      expect(m.topologySelections["seat-c"]).toEqual(["queue-handoff"]);
+      expect(m.topologySelections["seat-a"]).toBeUndefined();
+      expect(m.releases?.map((r) => r["owner"])).toEqual(["seat-a"]);
+    });
+
+    it("an unknown owner is never released, flag or not", () => {
+      const { refresh, reader, manifest } = setup();
+      refresh();
+      reader({ ownerLiveness: { "seat-a": { state: "unknown", reason: "seat state unreadable" } }, releaseOrphaned: { by: "lead" }, apply: true });
+      expect(manifest().topologySelections["seat-a"]).toEqual(["delegating-work", "queue-handoff"]);
+      expect(manifest().releases).toBeUndefined();
+    });
+
+    it("the caller's own selection is never an orphan, whatever the liveness map says about its name", () => {
+      const { refresh, reader } = setup();
+      refresh();
+      const out = reconcileSkillLoadout({ loadout: loadoutOf([], "/x"), runtime: "claude-code", cwd: setup().f.project, topologyOwner: "seat-a", ownerLiveness: ORPHAN });
+      expect(out.orphanedOwners).toBeUndefined();
+      void reader;
+    });
+
+    it("readLoadoutOwners lists the owners in the folder's manifest, and none for a folder without one", () => {
+      const { f } = setup(true);
+      expect(readLoadoutOwners(f.project, "claude-code")).toEqual(["seat-a", "seat-c"]);
+      expect(readLoadoutOwners(join(f.root, "elsewhere"), "claude-code")).toEqual([]);
     });
   });
 

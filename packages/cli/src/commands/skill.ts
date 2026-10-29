@@ -6,8 +6,10 @@ import type { StatusDeps } from "./status.js";
 import nodePath from "node:path";
 import { ConfigStore } from "../config-store.js";
 import {
+  readLoadoutOwners,
   reconcileSkillLoadout,
   resolveSkillLoadout,
+  type SkillOwnerLiveness,
   type SkillRuntime,
 } from "@openrig/daemon/skill-loadout";
 import { seatLaunchAdditionLines, type SeatLaunchAdditionsView } from "../seat-launch-additions-lines.js";
@@ -84,8 +86,10 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
     .option("--project-root <path>", "Project root whose project.yaml supplies install.skills (default: cwd)")
     .option("--topology <ids>", "Comma-separated topology/profile skill identities")
     .option("--apply", "Apply the reconciled loadout; default is read-only inspection")
+    .option("--release-orphaned", "Folder mode: drop the kept selections of owners whose seat is no longer live and refresh their plugin skills from the installed plugin (with --apply; without it, a plan). Never touches a live owner. Needs the daemon, to know which seats are live")
     .option("--json", "JSON output")
     .action(async (opts: {
+      releaseOrphaned?: boolean;
       runtime?: string;
       seat?: string;
       waitForIdle?: string;
@@ -128,7 +132,32 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
       const skippedSkills = resolved.loadout.skipped ?? [];
       if (!opts.json) for (const skip of skippedSkills) console.error(`Warning: ${skip.message}`);
       if (skippedSkills.some((skip) => skip.selectedBy.length > 0)) process.exitCode = 1;
-      const projection = reconcileSkillLoadout({ loadout: resolved.loadout, runtime, cwd, apply: opts.apply === true });
+      // P37b: which seats own the kept selections in this folder, and are they still live? Best effort for the report; a release
+      // refuses when the daemon cannot say, because an owner is released only on a positive "no live seat".
+      let ownerLiveness: Record<string, SkillOwnerLiveness> | undefined;
+      const owners = readLoadoutOwners(cwd, runtime);
+      if (owners.length > 0) {
+        try {
+          const deps = getDeps();
+          const status = await getDaemonStatus(deps.lifecycleDeps);
+          if (status.state === "running") {
+            const query = owners.map((owner) => `owner=${encodeURIComponent(owner)}`).join("&");
+            const answer = await deps.clientFactory(getDaemonUrl(status)).get<{ owners?: Record<string, SkillOwnerLiveness> }>(`/api/skills/owners?${query}`);
+            if (answer.status === 200 && answer.data?.owners && typeof answer.data.owners === "object") ownerLiveness = answer.data.owners;
+          }
+        } catch { /* reported below, only if a release needed it */ }
+      }
+      if (opts.releaseOrphaned && !ownerLiveness) {
+        console.error("release_unavailable: --release-orphaned needs the daemon to say which owner seats are live, and it could not be asked. Nothing was changed.");
+        process.exitCode = 1;
+        return;
+      }
+      const releasedBy = process.env["OPENRIG_SESSION_NAME"]?.trim() || process.env["USER"] || "unknown";
+      const projection = reconcileSkillLoadout({
+        loadout: resolved.loadout, runtime, cwd, apply: opts.apply === true,
+        ...(ownerLiveness ? { ownerLiveness } : {}),
+        ...(opts.releaseOrphaned ? { releaseOrphaned: { by: releasedBy } } : {}),
+      });
       if (opts.json) {
         console.log(JSON.stringify({ ...resolved, projection }, null, 2));
       } else {
@@ -138,6 +167,12 @@ export function skillCommand(depsOverride?: StatusDeps): Command {
           console.log(`  ${receipt.revision} ${receipt.digest} ${receipt.detail}`);
         }
         for (const id of projection.removed) console.log(`removed     ${id} (deselected, owned, unchanged)`);
+        for (const orphan of projection.orphanedOwners ?? []) {
+          console.log(`orphaned    ${orphan.owner}: ${orphan.reason}; ${orphan.skills.length} kept skill${orphan.skills.length === 1 ? "" : "s"}${opts.releaseOrphaned ? "" : " (re-run with --release-orphaned to drop and refresh)"}`);
+        }
+        for (const released of projection.releasedOwners ?? []) {
+          console.log(`${projection.applied ? "released   " : "would release"} ${released.owner}: ${released.skills.length} skill${released.skills.length === 1 ? "" : "s"} (by ${released.by})`);
+        }
         if (projection.freshLaunchRequired) {
           console.log("restart     start a fresh seat process before expecting the changed ambient skill set");
         }

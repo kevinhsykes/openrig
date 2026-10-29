@@ -36,6 +36,7 @@ import type { SessionTransport } from "../domain/session-transport.js";
 import type { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { applySeatSkills, bootstrapLineChoice, inspectSeatSkills, resolveSeat } from "../domain/seat-skill-apply.js";
 import { transportSenderSession } from "./require-sender-identity.js";
+import { ownerLiveness } from "../domain/skill-owner-liveness.js";
 import { getDefaultOpenRigPath } from "../openrig-compat.js";
 
 type ContextGetter = (key: string) => unknown;
@@ -169,6 +170,17 @@ export function skillsRoutes(): Hono {
     const occupant = registry?.currentOccupantTenure(resolved.seat.nodeId)?.generationUuid ?? null;
     return { seat: resolved.seat, occupant } as const;
   };
+
+  // P37b: whether the seats that own kept skill selections are still live, for `rig skill loadout`. Read-only.
+  router.get("/owners", (c) => {
+    const db = c.get("db" as never) as Database.Database | undefined;
+    if (!db) return c.json({ error: "the daemon database is unavailable" }, 503);
+    const owners = c.req.queries("owner") ?? [];
+    if (owners.length === 0 || owners.length > 200 || owners.some((owner) => owner.length === 0 || owner.length > 200)) {
+      return c.json({ error: "give between 1 and 200 non-empty owner= values" }, 400);
+    }
+    return c.json({ owners: ownerLiveness(db, [...new Set(owners)]) });
+  });
 
   router.get("/seat", (c) => {
     const ctx = seatContext(c, c.req.query("session"));

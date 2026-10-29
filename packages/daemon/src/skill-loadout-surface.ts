@@ -1,4 +1,5 @@
 export {
+  readLoadoutOwners,
   readProjectSkillSelection,
   readSystemSkillSelection,
   reconcileSkillLoadout,
@@ -7,9 +8,12 @@ export {
 
 export type {
   CatalogSkill,
+  OrphanedOwnerReport,
+  ReleasedOwnerRecord,
   ReconcileSkillLoadoutResult,
   ResolveSkillLoadoutResult,
   SkillCatalogFailure,
+  SkillOwnerLiveness,
   SkillLoadout,
   SkillProjectionReceipt,
   SkillProjectionStatus,

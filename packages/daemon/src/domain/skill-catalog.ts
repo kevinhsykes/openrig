@@ -110,6 +110,29 @@ export interface SkillLoadoutLocation {
   refuseMutation?: () => string | undefined;
 }
 
+/** P37b: whether the seat that owns a kept selection still exists. "orphaned" = no live node for it (absent, or only superseded
+ *  ones); "unknown" = it could not be told, which is treated as live. */
+export interface SkillOwnerLiveness {
+  state: "live" | "orphaned" | "unknown";
+  reason?: string;
+}
+
+/** P37b: a kept selection whose owner seat is not live. */
+export interface OrphanedOwnerReport {
+  owner: string;
+  reason: string;
+  skills: string[];
+}
+
+/** P37b: an explicit release of an orphaned owner's kept selections, recorded in the ownership manifest. */
+export interface ReleasedOwnerRecord {
+  owner: string;
+  skills: string[];
+  at: string;
+  by: string;
+  reason: string;
+}
+
 interface OwnershipManifest {
   schema: typeof MANIFEST_SCHEMA;
   runtime: SkillRuntime;
@@ -118,6 +141,8 @@ interface OwnershipManifest {
   topologySelections: Record<string, string[]>;
   projectSelection: string[];
   skills: OwnedSkill[];
+  /** P37b: every release made in this folder, oldest first (who, when, which owner and skills). */
+  releases?: ReleasedOwnerRecord[];
 }
 
 interface GitIgnorePlan {
@@ -138,6 +163,10 @@ export interface ReconcileSkillLoadoutResult {
   receipts: SkillProjectionReceipt[];
   removed: string[];
   errors: SkillCatalogFailure[];
+  /** P37b: kept selections whose owner seat is not live (only when the caller supplied ownerLiveness). */
+  orphanedOwners?: OrphanedOwnerReport[];
+  /** P37b: orphaned owners released by this call (a plan when `applied` is false). */
+  releasedOwners?: ReleasedOwnerRecord[];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -570,6 +599,15 @@ function ownershipManifestPath(cwd: string, runtime: SkillRuntime): string {
   return nodePath.join(cwd, ".openrig", "skill-loadouts", `${runtime}.json`);
 }
 
+/** P37b: the owners that hold kept selections in this folder's manifest, for a caller that asks whether their seats are live.
+ *  A missing or unreadable manifest has none (reconcile itself reports an unreadable one). */
+export function readLoadoutOwners(cwd: string, runtime: SkillRuntime): string[] {
+  try {
+    const manifest = readOwnershipManifest(ownershipManifestPath(cwd, runtime), runtime, targetRootFor(runtime, cwd));
+    return Object.keys(manifest.topologySelections).sort(compareBytes);
+  } catch { return []; }
+}
+
 function readOwnershipManifest(path: string, runtime: SkillRuntime, targetRoot: string): OwnershipManifest {
   if (!existsSync(path)) {
     return { schema: MANIFEST_SCHEMA, runtime, targetRoot, updatedAt: "", topologySelections: {}, projectSelection: [], skills: [] };
@@ -632,6 +670,13 @@ function readOwnershipManifest(path: string, runtime: SkillRuntime, targetRoot: 
     && (!Array.isArray(rawProject) || !rawProject.every((id) => typeof id === "string" && SAFE_ID.test(id)) || new Set(rawProject).size !== rawProject.length)
   ) {
     throw new Error(`skill ownership manifest contains an invalid project selection at ${path}; move it aside and re-run inspection`);
+  }
+  const rawReleases = value["releases"];
+  if (rawReleases !== undefined && (!Array.isArray(rawReleases) || !rawReleases.every((entry) => isRecord(entry)
+    && typeof entry["owner"] === "string" && SAFE_TOPOLOGY_OWNER.test(entry["owner"])
+    && Array.isArray(entry["skills"]) && entry["skills"].every((id) => typeof id === "string" && SAFE_ID.test(id))
+    && typeof entry["at"] === "string" && typeof entry["by"] === "string" && typeof entry["reason"] === "string"))) {
+    throw new Error(`skill ownership manifest contains invalid release records at ${path}; move it aside and re-run inspection`);
   }
   const parsed = value as unknown as Omit<OwnershipManifest, "topologySelections" | "projectSelection"> & {
     topologySelections?: Record<string, string[]>;
@@ -871,6 +916,11 @@ export function reconcileSkillLoadout(input: {
    *  union instead of deleting one another. CLI-only reconciliation uses the
    *  workspace owner. */
   topologyOwner?: string;
+  /** P37b: whether each OTHER owner in the manifest still has a live seat. Absent or "unknown" = live (fail closed). */
+  ownerLiveness?: Readonly<Record<string, SkillOwnerLiveness>>;
+  /** P37b: drop the kept selections of orphaned owners, and refresh their plugin skills from the installed plugin as this
+   *  call's own selection. Never touches an owner that is live or unknown. Recorded in the manifest when applied. */
+  releaseOrphaned?: { by: string; at?: string };
   /** #875 — keep the loadout here instead of under the cwd. */
   location?: SkillLoadoutLocation;
 }): ReconcileSkillLoadoutResult {
@@ -948,6 +998,28 @@ export function reconcileSkillLoadout(input: {
   const topologySelections: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   for (const owner of Object.keys(manifest.topologySelections).sort(compareBytes)) {
     topologySelections[owner] = [...manifest.topologySelections[owner]!].sort(compareBytes);
+  }
+  // P37b: owners whose seat is not live. Reported always; released only on request, and only the orphaned ones.
+  const orphanSet = new Set(Object.keys(manifest.topologySelections).filter((owner) => owner !== topologyOwner && input.ownerLiveness?.[owner]?.state === "orphaned"));
+  const orphanReason = (owner: string) => input.ownerLiveness?.[owner]?.reason ?? "owner seat is not live";
+  const orphanedOwners: OrphanedOwnerReport[] = [...orphanSet].sort(compareBytes)
+    .map((owner) => ({ owner, reason: orphanReason(owner), skills: [...manifest.topologySelections[owner]!] }));
+  const releasedOwners: ReleasedOwnerRecord[] = [];
+  const releasedIds = new Set<string>();
+  if (input.releaseOrphaned) {
+    const at = input.releaseOrphaned.at ?? new Date().toISOString();
+    for (const report of orphanedOwners) {
+      delete topologySelections[report.owner];
+      for (const id of report.skills) {
+        releasedIds.add(id);
+        const prior = owned.get(id);
+        const pluginId = prior ? pluginIdOf(prior.revision) : undefined;
+        if (!prior || !pluginId || loadoutEntries.some((entry) => entry.id === id)) continue;
+        const fresh = resolvePluginSkills({ pluginId, pluginRoot: prior.sourceRoot, runtime: input.runtime }).entries.find((entry) => entry.id === id);
+        if (fresh) loadoutEntries.push({ ...fresh, selectedBy: ["topology"] });
+      }
+      releasedOwners.push({ owner: report.owner, skills: report.skills, at, by: input.releaseOrphaned.by, reason: report.reason });
+    }
   }
   // A topology skill skipped for uncommitted catalog content stays in this owner's selection while its kept copy
   // exists, so another owner reconciling the same cwd doesn't remove that copy as deselected.
@@ -1114,6 +1186,18 @@ export function reconcileSkillLoadout(input: {
     if (status === "conflicting") errors.push({ code: "target_conflict", message: `${skill.id}: ${detail}`, path: target });
   }
   receipts.push(...keptReceipts);
+  // P37b: a kept skill whose every owner is orphaned says so, once, in its receipt.
+  for (const receipt of receipts) {
+    if (releasedIds.has(receipt.id)) continue;
+    const owners = Object.keys(manifest.topologySelections).filter((owner) => manifest.topologySelections[owner]!.includes(receipt.id));
+    if (owners.length > 0 && owners.every((owner) => orphanSet.has(owner))) {
+      receipt.detail += `; kept for ${owners.join(", ")}, whose seat is not live (${[...new Set(owners.map(orphanReason))].join("; ")}); \`rig skill loadout --release-orphaned\` drops that selection and refreshes the copy`;
+    }
+  }
+  const ownerFields = (): Pick<ReconcileSkillLoadoutResult, "orphanedOwners" | "releasedOwners"> => ({
+    ...(orphanedOwners.length > 0 ? { orphanedOwners } : {}),
+    ...(releasedOwners.length > 0 ? { releasedOwners } : {}),
+  });
 
   const selectedIds = new Set(effectiveEntries.map((entry) => entry.id));
   const safeRemovals: OwnedSkill[] = [];
@@ -1153,7 +1237,7 @@ export function reconcileSkillLoadout(input: {
   }
 
   if (errors.length > 0 || !input.apply) {
-    return { ok: errors.length === 0, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [], errors };
+    return { ok: errors.length === 0, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [], errors, ...ownerFields() };
   }
 
   const changed = receipts.filter((receipt) => receipt.status === "missing" || receipt.status === "stale");
@@ -1196,7 +1280,7 @@ export function reconcileSkillLoadout(input: {
     && JSON.stringify(manifest.projectSelection) === JSON.stringify(projectSelection)
     && !gitIgnorePlans.some((plan) => plan.changed)
   ) {
-    return { ok: true, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [], errors: [] };
+    return { ok: true, applied: false, freshLaunchRequired: false, runtime: input.runtime, targetRoot, manifestPath, receipts, removed: [], errors: [], ...ownerFields() };
   }
   const refusal = input.location?.refuseMutation?.();
   if (refusal) {
@@ -1249,6 +1333,7 @@ export function reconcileSkillLoadout(input: {
       topologySelections: canonicalTopologySelections,
       projectSelection,
       skills: nextOwned,
+      ...(releasedOwners.length > 0 || manifest.releases ? { releases: [...(manifest.releases ?? []), ...releasedOwners] } : {}),
     };
     const tmpManifest = `${manifestPath}.${randomUUID()}.tmp`;
     writeFileSync(tmpManifest, `${JSON.stringify(nextManifest, null, 2)}\n`, "utf8");
@@ -1264,6 +1349,7 @@ export function reconcileSkillLoadout(input: {
       receipts,
       removed,
       errors: [],
+      ...ownerFields(),
     };
   } catch (err) {
     for (const action of rollback.reverse()) {
