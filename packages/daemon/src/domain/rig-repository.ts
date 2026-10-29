@@ -306,6 +306,9 @@ interface NodeOptions {
   role?: string;
   runtime?: string;
   model?: string;
+  /** P25: the model the spec asked for by rail, in canonical form (`rail:minimax`). `model` stays the literal the seat launches
+   *  with and is NULL until the first launch resolves the request. */
+  modelRequest?: string;
   effort?: string;
   advisor?: string;
   codexConfigProfile?: string;
@@ -603,6 +606,11 @@ export class RigRepository {
   }
 
   addNode(rigId: string, logicalId: string, opts?: NodeOptions): Node {
+    if (opts?.modelRequest !== undefined) {
+      // Checked before anything is written, so a refusal leaves no node behind.
+      if (!this.hasNodeColumn("model_request")) throw new Error("model_request needs migration 142; this database does not have it");
+      if (opts.model !== undefined) throw new Error("a seat names a literal model or a model request, not both");
+    }
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       validateClaudePermissionRules(opts.claudePermissions);
@@ -711,6 +719,10 @@ export class RigRepository {
         );
     }
 
+    if (opts?.modelRequest !== undefined) {
+      this.db.prepare("UPDATE nodes SET model_request = ? WHERE id = ?").run(opts.modelRequest, id);
+    }
+
     if (opts?.claudePermissions !== undefined) {
       if (opts.runtime !== "claude-code") throw new Error("claude_permissions requires a claude-code seat");
       this.db.prepare("UPDATE nodes SET claude_permissions_json = ? WHERE id = ?")
@@ -773,6 +785,24 @@ export class RigRepository {
       .prepare("UPDATE nodes SET model = ? WHERE id = ?")
       .run(model, nodeId);
     return result.changes > 0;
+  }
+
+  /** P25: what the seat asked for by rail and the latest resolution, or nulls for a seat that names a literal model (and for a
+   *  database without migration 142). */
+  getNodeModelRequest(nodeId: string): { request: string | null; resolutionJson: string | null } {
+    if (!this.hasNodeColumn("model_request")) return { request: null, resolutionJson: null };
+    const row = this.db.prepare("SELECT model_request AS request, model_resolution_json AS resolutionJson FROM nodes WHERE id = ?")
+      .get(nodeId) as { request: string | null; resolutionJson: string | null } | undefined;
+    return row ?? { request: null, resolutionJson: null };
+  }
+
+  /** P25: write a rail resolution. `nodes.model` and its provenance change in ONE statement, so a reader never sees a launch
+   *  value without the record of where it came from. Only a seat that has a model_request can be written; returns whether a row
+   *  changed. */
+  setNodeModelResolution(nodeId: string, model: string, resolutionJson: string): boolean {
+    if (!this.hasNodeColumn("model_request")) return false;
+    return this.db.prepare("UPDATE nodes SET model = ?, model_resolution_json = ? WHERE id = ? AND model_request IS NOT NULL")
+      .run(model, resolutionJson, nodeId).changes > 0;
   }
 
   /** Saves a seat's launch directory only if it's still `expectedCwd`. The lifecycle service checks the new
