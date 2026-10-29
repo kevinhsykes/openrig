@@ -21,6 +21,7 @@ import { CLAUDE_MANAGED_BLOCK_FILES } from "./managed-blocks.js";
 import { canonicalCompactionStrategy, canonicalContinuityMechanic } from "./agent-manifest.js";
 import { unknownLevelWarning } from "./seat-effort.js";
 import { aliasModelPinAdvisory } from "./spec-validation-advisory.js";
+import { parseModelRequest, describeModelRequest } from "./model-resolver.js";
 import { normalizeSeatEnv, validateSeatEnv } from "./seat-env.js";
 import { validatePermissionPolicyRef } from "./permission-policy/policy-ref.js";
 import { deriveCanonicalSessionName } from "./session-name.js";
@@ -542,6 +543,7 @@ function validateMember(member: Record<string, unknown>, index: number, podPrefi
       errors.push(`${prefix}.codex_config_profile: only valid when runtime is "codex"`);
     }
   }
+  { const problem = railModelProblem(member["model"]); if (problem) errors.push(`${prefix}.model: ${problem}`); }
   if (member["effort"] !== undefined) {
     if (typeof member["effort"] !== "string" || !member["effort"].trim()) {
       advisories.push(`${prefix}.effort: non-string value "${member["effort"]}" ignored; effort must be a text value`);
@@ -1255,6 +1257,27 @@ function validateClaudeAdditions(member: Record<string, unknown>, prefix: string
   return errors;
 }
 
+/** P25: a `model` that asks for a rail (`rail:<name>` or `{ rail: <name> }`). Any other value is left exactly as it was before this
+ *  existed, so a literal spec validates and normalizes byte-identically. */
+function isRailModelValue(value: unknown): boolean {
+  if (typeof value === "string") return value.trim().startsWith("rail:");
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+/** The refusal for a malformed rail request, or null when `model` is not a rail request or is a good one. */
+function railModelProblem(value: unknown): string | null {
+  if (!isRailModelValue(value)) return null;
+  const parsed = parseModelRequest(value);
+  return parsed.ok ? null : parsed.error;
+}
+
+/** The canonical request (`rail:minimax`) for a good rail request; undefined for everything else. */
+function railModelRequest(value: unknown): string | undefined {
+  if (!isRailModelValue(value)) return undefined;
+  const parsed = parseModelRequest(value);
+  return parsed.ok && parsed.request.kind === "rail" ? describeModelRequest(parsed.request) : undefined;
+}
+
 function normalizePod(raw: Record<string, unknown>): RigSpecPod {
   const members = (raw["members"] as Record<string, unknown>[]).map((m) => ({
     id: m["id"] as string,
@@ -1263,7 +1286,8 @@ function normalizePod(raw: Record<string, unknown>): RigSpecPod {
     profile: m["profile"] as string,
     runtime: m["runtime"] as string,
     codexConfigProfile: m["codex_config_profile"] as string | undefined,
-    model: m["model"] as string | undefined,
+    model: railModelRequest(m["model"]) ? undefined : m["model"] as string | undefined,
+    ...(railModelRequest(m["model"]) ? { modelRequest: railModelRequest(m["model"]) } : {}),
     effort: typeof m["effort"] === "string" && m["effort"].trim() ? m["effort"].trim() : undefined,
     advisor: typeof m["advisor"] === "string" && m["advisor"].trim() ? m["advisor"].trim() : undefined,
     role: m["role"] as string | undefined,
@@ -1396,6 +1420,7 @@ export class LegacyRigSpecSchema {
           try { validateCodexMemberPermissions(node["codex_permissions"], `nodes.${nodeWhere}.codex_permissions`); }
           catch (error) { errors.push((error as Error).message); }
         }
+        { const problem = railModelProblem(node["model"]); if (problem) errors.push(`nodes.${nodeWhere}.model: ${problem}`); }
         if (node["effort"] !== undefined) {
           if (typeof node["effort"] !== "string" || !node["effort"].trim()) {
             advisories.push(`nodes.${nodeWhere}.effort: non-string value "${node["effort"]}" ignored; effort must be a text value`);
@@ -1457,7 +1482,8 @@ export class LegacyRigSpecSchema {
       id: n["id"] as string,
       runtime: n["runtime"] as string,
       role: (n["role"] as string) ?? undefined,
-      model: (n["model"] as string) ?? undefined,
+      model: railModelRequest(n["model"]) ? undefined : (n["model"] as string) ?? undefined,
+      ...(railModelRequest(n["model"]) ? { modelRequest: railModelRequest(n["model"]) } : {}),
       effort: typeof n["effort"] === "string" && n["effort"].trim() ? n["effort"].trim() : undefined,
       advisor: typeof n["advisor"] === "string" && n["advisor"].trim() ? n["advisor"].trim() : undefined,
       ...(n["claude_permissions"] === undefined ? {} : { claudePermissions: validateClaudePermissionRules(n["claude_permissions"]) }),

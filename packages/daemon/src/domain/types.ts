@@ -1077,6 +1077,8 @@ export interface LegacyRigSpecNode {
   runtime: string;
   role?: string;
   model?: string;
+  /** P25: the model asked for by rail, canonical (`rail:minimax`); then `model` is unset and the launch resolves it. */
+  modelRequest?: string;
   effort?: string;
   advisor?: string;
   claudePermissions?: import("./claude-permission-rules.js").ClaudePermissionRules;
@@ -1187,6 +1189,8 @@ export interface RigSpecPodMember {
   runtime: string;
   codexConfigProfile?: string;
   model?: string;
+  /** P25: the model asked for by rail, canonical (`rail:minimax`); then `model` is unset and the launch resolves it. */
+  modelRequest?: string;
   effort?: string;
   advisor?: string;
   /**
