@@ -168,6 +168,8 @@ export interface RiggedConfig {
     /** Rows of tmux scrollback per pane; `rig setup` writes it into the managed `~/.tmux.conf` block. */
     historyLimit: number;
     inheritTmuxEnvironment: boolean;
+    /** P39: "disabled" (default) gives a seat a session bus address that cannot connect; "inherit" gives it the daemon's own. */
+    seatSessionBus: "inherit" | "disabled";
   };
   // Slice 15 (OPR.0.7.0.15) — the ONE switch for compact command-output
   // defaults (default off: today's output). Read by the CLI only; the daemon
@@ -357,6 +359,7 @@ const DEFAULTS = {
     statusBar: false,
     historyLimit: 10000,
     inheritTmuxEnvironment: false,
+    seatSessionBus: "disabled",
   },
   // Slice 15 — compact command-output defaults OFF until the switch is on.
   output: {
@@ -507,6 +510,7 @@ export const VALID_KEYS = [
   // The managed ~/.tmux.conf block's history-limit, written by `rig setup`; lockstep with the daemon twin.
   "terminal.history_limit",
   "terminal.inherit_tmux_environment",
+  "terminal.seat_session_bus",
   // Slice 15 — compact command-output defaults; lockstep with the daemon twin.
   "output.compact",
   "output.whoami_peers",
@@ -628,6 +632,7 @@ export const ENV_MAP: Record<ValidKey, { primary: string; legacy?: string }> = {
   "terminal.status_bar": { primary: "OPENRIG_TERMINAL_STATUS_BAR" },
   "terminal.history_limit": { primary: "OPENRIG_TERMINAL_HISTORY_LIMIT" },
   "terminal.inherit_tmux_environment": { primary: "OPENRIG_TERMINAL_INHERIT_TMUX_ENVIRONMENT" },
+  "terminal.seat_session_bus": { primary: "OPENRIG_TERMINAL_SEAT_SESSION_BUS" },
   "output.compact": { primary: "OPENRIG_OUTPUT_COMPACT" },
   "output.whoami_peers": { primary: "OPENRIG_OUTPUT_WHOAMI_PEERS" },
   "provider.usage_windows": { primary: "OPENRIG_PROVIDER_USAGE_WINDOWS" },
@@ -726,6 +731,7 @@ const KEY_TO_PATH: Record<ValidKey, string[]> = {
   "terminal.status_bar": ["terminal", "statusBar"],
   "terminal.history_limit": ["terminal", "historyLimit"],
   "terminal.inherit_tmux_environment": ["terminal", "inheritTmuxEnvironment"],
+  "terminal.seat_session_bus": ["terminal", "seatSessionBus"],
   "output.compact": ["output", "compact"],
   "output.whoami_peers": ["output", "whoamiPeers"],
   "provider.usage_windows": ["provider", "usageWindows"],
@@ -966,6 +972,13 @@ const KEY_CONSTRAINTS: Partial<Record<ValidKey, (raw: string, coerced: string | 
   "runtime.readiness_timeout_seconds": (raw, coerced) => {
     if (!/^\d+$/.test(raw.trim()) || typeof coerced !== "number" || !Number.isInteger(coerced) || coerced < 1 || coerced > 600) {
       throw new Error(`Invalid value for runtime.readiness_timeout_seconds: must be an integer in [1, 600], got "${raw}"`);
+    }
+  },
+  // P39: how a seat's launch environment treats the user's session bus. "disabled" (default) keeps upstream's behaviour:
+  // a seat gets the daemon's runtime directory and an address that cannot connect. "inherit" hands the seat the daemon's own bus.
+  "terminal.seat_session_bus": (raw) => {
+    if (raw.trim() !== "inherit" && raw.trim() !== "disabled") {
+      throw new Error(`Invalid value for terminal.seat_session_bus: must be "inherit" or "disabled", got "${raw}"`);
     }
   },
   // tmux trims a full pane by a tenth of the limit, so 2000 keeps the 1000-row transcript window.
@@ -1331,6 +1344,7 @@ export class ConfigStore {
         statusBar: v("terminal.status_bar") as boolean,
         historyLimit: v("terminal.history_limit") as number,
         inheritTmuxEnvironment: v("terminal.inherit_tmux_environment") as boolean,
+        seatSessionBus: v("terminal.seat_session_bus") as "inherit" | "disabled",
       },
       output: {
         compact: v("output.compact") as boolean,

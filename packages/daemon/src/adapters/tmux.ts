@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import type { ComposerSnapshot } from "../domain/composer-prompts.js";
 import { inspectComposerInput } from "../domain/session-transport.js";
 import { parentSessionEnvKeys, removeParentSessionEnv } from "../domain/parent-session-env.js";
-import { addSeatRuntimeDir } from "../domain/seat-runtime-dir.js";
+import { addSeatRuntimeDir, addSeatSessionBus } from "../domain/seat-runtime-dir.js";
 import type { TmuxControlExec } from "./tmux-control.js";
 
 export type ExecFn = (cmd: string) => Promise<string>;
@@ -372,7 +372,11 @@ export class TmuxAdapter {
   /** Read for each new agent/successor. Unconfigured adapters retain legacy behavior. */
   launchEnvironment?: () => { inheritTmuxEnvironment: boolean; env: Readonly<Record<string, string | undefined>>;
     /** The runtime directory a seat gets when it has none of its own (seat-runtime-dir.ts); none on macOS. */
-    runtimeDir?: string };
+    runtimeDir?: string;
+    /** P39 (terminal.seat_session_bus): "inherit" hands a seat the daemon's own bus address with the runtime directory. */
+    sessionBus?: "inherit" | "disabled";
+    /** The daemon's own session bus address, read only when sessionBus is "inherit". */
+    busAddress?: string };
 
   /** Reset before the selected user shell runs, without changing the server or other sessions.
    * Multiple tmux command arguments execute directly; only this fixed non-interactive sh runs
@@ -399,7 +403,15 @@ export class TmuxAdapter {
       removeParentSessionEnv(baseline);
       // A seat's own value (its env:, a one-off name, or a name in update-environment) wins over the runtime directory.
       const selected: Record<string, string | undefined> = { ...baseline, ...seatEnv };
-      addSeatRuntimeDir(selected, policy.runtimeDir);
+      if (policy.sessionBus === "inherit") {
+        if (!addSeatSessionBus(selected, policy.runtimeDir, policy.busAddress)) {
+          // Not an admission gate (as above): the seat still starts, with upstream's bus that cannot connect, and the warning says why.
+          addSeatRuntimeDir(selected, policy.runtimeDir);
+          const note = "terminal.seat_session_bus is inherit, but the daemon has no usable XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS; this seat gets a session bus that cannot connect.";
+          warnings.push(note);
+          console.warn(`[seat launch] ${note}`);
+        }
+      } else addSeatRuntimeDir(selected, policy.runtimeDir);
       const values = Object.entries(selected)
         .filter((entry): entry is [string,string] => entry[1] !== undefined && !["TMUX", "TMUX_PANE", "TERM", "TERM_PROGRAM", "TERM_PROGRAM_VERSION", "SHELL"].includes(entry[0]))
         .map(([key,value]) => {

@@ -105,6 +105,9 @@ Keys:
                          POSIX launches otherwise start from daemon + seat environment, preserving shell startup.
                          Turn on for custom setups that intentionally rely on tmux globals. Running agents are unchanged.
                          If the scoped boundary is unavailable, launch continues with its previous environment and a diagnostic.
+  terminal.seat_session_bus  "disabled" (default) gives a new agent a session bus address that cannot connect;
+                         "inherit" gives it the daemon's own XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS (keyring, notifications).
+                         Applies to new launches of POSIX agents that start from the daemon environment (not Claude's managed launch).
   terminal.status_bar    show the inner tmux status bar on launch (default off)
   terminal.history_limit rows of tmux scrollback per pane in the ~/.tmux.conf block rig setup writes (2000-1000000; default 10000).
                          To keep more: rig config set terminal.history_limit 50000, then rig setup. A running tmux server keeps

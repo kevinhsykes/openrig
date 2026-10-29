@@ -17,7 +17,7 @@ import { execFileSync } from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { createDaemon } from "../src/startup.js";
-import { seatRuntimeDir } from "../src/domain/seat-runtime-dir.js";
+import { seatRuntimeDir, daemonSessionBusAddress } from "../src/domain/seat-runtime-dir.js";
 import type { AppDeps } from "../src/server.js";
 import type { CmuxTransportFactory } from "../src/terminal/cmux-transport.js";
 import type { ExecFn } from "../src/domain/tmux-adapter.js";
@@ -92,6 +92,11 @@ describe("P16 — AppDeps members with safety semantics are composed (definednes
 describe("P16 — domain-internal safety injections (the recurred class, pinned at the wire)", () => {
   it("new seats receive the daemon's runtime directory default (#2030)", () => {
     expect(deps.tmuxAdapter.launchEnvironment!()).toHaveProperty("runtimeDir", seatRuntimeDir(process.env));
+  });
+  it("P39: new seats get the daemon's bus address only when terminal.seat_session_bus is inherit (default: disabled)", () => {
+    const policy = deps.tmuxAdapter.launchEnvironment!();
+    expect(policy.sessionBus).toBe("disabled");
+    expect(policy.busAddress).toBe(daemonSessionBusAddress(process.env));
   });
   it("new seats receive the selected database and configured tmux directory, not a stale DB override", () => {
     const env = deps.tmuxAdapter.launchEnvironment!().env;

@@ -158,6 +158,7 @@ describe("SettingsStore (User Settings v0)", () => {
       "terminal.status_bar",
       "terminal.history_limit",
       "terminal.inherit_tmux_environment",
+      "terminal.seat_session_bus",
       // Slice 15 (OPR.0.7.0.15) — compact command-output defaults switch.
       "output.compact",
       // Slice 15 P5 — the whoami peer bound under output.compact.

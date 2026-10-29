@@ -16,6 +16,24 @@ export function seatRuntimeDir(env: Readonly<Record<string, string | undefined>>
   return platform === "linux" && dir && path.isAbsolute(dir) ? dir : undefined;
 }
 
+/** The daemon's own session bus address, when it can be handed to a seat as it is: a non-empty single line that is not
+ *  the address OpenRig itself uses to say "no bus". */
+export function daemonSessionBusAddress(env: Readonly<Record<string, string | undefined>>): string | undefined {
+  const address = env.DBUS_SESSION_BUS_ADDRESS;
+  return address && address !== NO_SESSION_BUS && !/[\x00-\x1f\x7f]/.test(address) ? address : undefined;
+}
+
+/** P39 (terminal.seat_session_bus = inherit): give a seat the daemon's own runtime directory AND session bus address, so
+ *  tools that need the person's session bus (the keyring behind a key helper, notifications) work in a seat without a
+ *  hand-set tmux option. A value the seat already has wins, as for addSeatRuntimeDir. Returns false, changing nothing, when
+ *  the daemon has no runtime directory or no usable bus address: the caller then falls back to the default and says so. */
+export function addSeatSessionBus(env: Record<string, string | undefined>, runtimeDir: string | undefined, busAddress: string | undefined): boolean {
+  if (!runtimeDir || !busAddress) return false;
+  if (env.XDG_RUNTIME_DIR === undefined) env.XDG_RUNTIME_DIR = runtimeDir;
+  if (!env.DBUS_SESSION_BUS_ADDRESS) env.DBUS_SESSION_BUS_ADDRESS = busAddress;
+  return true;
+}
+
 /** Lay the runtime directory and the bus address that can't connect under a seat's launch environment, in place. A
  *  value the seat already has wins. Its own XDG_RUNTIME_DIR leaves both names as they are, so a seat that chose its
  *  runtime directory keeps finding its bus there as before; its own DBUS_SESSION_BUS_ADDRESS is kept beside the added

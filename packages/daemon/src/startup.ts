@@ -53,7 +53,7 @@ import { ClaudeResumeAdapter } from "./adapters/claude-resume.js";
 import { CodexResumeAdapter } from "./adapters/codex-resume.js";
 import { codexDaemonSupportProbe } from "./domain/codex-daemon-support.js";
 import { claudeConfigRootFor, declaredRuntimeHomes, seatRuntimeHome } from "./domain/seat-runtime-home.js";
-import { seatRuntimeDir } from "./domain/seat-runtime-dir.js";
+import { daemonSessionBusAddress, seatRuntimeDir } from "./domain/seat-runtime-dir.js";
 import { codexNetworkDefaultReader } from "./domain/codex-network-default.js";
 import { codexUsageReader } from "./domain/provider/codex-usage-reader.js";
 import { CodexUsageWindows } from "./domain/provider/codex-usage-windows.js";
@@ -677,6 +677,9 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
       .map(key => [key, process.env[key]])), ...launchSessionEnv },
     // #2030: on Linux, the daemon's runtime directory, with a session bus address that can't connect.
     runtimeDir: seatRuntimeDir(process.env),
+    // P39: "inherit" also hands seats the daemon's own session bus (the keyring); the default keeps an address that cannot connect.
+    sessionBus: tmuxOptionSettings.resolveOne("terminal.seat_session_bus").value === "inherit" ? "inherit" : "disabled",
+    busAddress: daemonSessionBusAddress(process.env),
   });
   const tmuxOptionDefaults = new TmuxOptionDefaultsApplier({
     tmuxAdapter,
