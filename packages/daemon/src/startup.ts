@@ -28,6 +28,8 @@ import { migrate } from "./db/migrate.js";
 // never an inline copy that can drift out of sync with the daemon's schema.
 import { ALL_MIGRATIONS } from "./db/all-migrations.js";
 import { RigRepository } from "./domain/rig-repository.js";
+import { NodeModelMaterializer } from "./domain/node-model-materializer.js";
+import { piSeatModelsCheck } from "./domain/pi-seat-models.js";
 import { SessionRegistry } from "./domain/session-registry.js";
 import { deriveCanonicalSessionName, isHumanSeatSessionRef, parseSessionName } from "./domain/session-name.js";
 import { resolveExternal } from "./domain/gateway/external-admission.js";
@@ -771,6 +773,7 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   let persistedFreshPodLaunchAvailable: ((rigId: string, nodeId: string) => boolean) | undefined;
 
   const restoreOrchestrator = new RestoreOrchestrator({
+    modelMaterializer: new NodeModelMaterializer({ db, rigRepo, eventBus, installed: piSeatModelsCheck({ openrigHome: OPENRIG_HOME, rigRepo }) }),
     db, rigRepo, sessionRegistry, eventBus, snapshotRepo, snapshotCapture,
     checkpointStore, nodeLauncher, tmuxAdapter, claudeResume, codexResume, piResume, ompResume,
     transcriptStore, serviceOrchestrator,

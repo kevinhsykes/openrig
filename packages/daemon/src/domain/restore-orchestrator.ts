@@ -220,6 +220,8 @@ interface RestoreOrchestratorDeps {
   piResume?: PiResumeAdapter;
   ompResume?: OmpResumeAdapter;
   transcriptStore?: TranscriptStore;
+  /** P25: resolves a seat's rail request into its model before the restore reads it. Without it a seat that asks for a rail is not restored. */
+  modelMaterializer?: Pick<import("./node-model-materializer.js").NodeModelMaterializer, "materialize">;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
   /** Rebuild a deliberate fresh pod-aware launch from its persisted recipe. */
@@ -238,6 +240,7 @@ export class RestoreOrchestrator {
   readonly db: Database.Database;
   private activeRestores = new Set<string>();
   private rigRepo: RigRepository;
+  private modelMaterializer: Pick<import("./node-model-materializer.js").NodeModelMaterializer, "materialize"> | null;
   private sessionRegistry: SessionRegistry;
   private eventBus: EventBus;
   private snapshotRepo: SnapshotRepository;
@@ -281,6 +284,7 @@ export class RestoreOrchestrator {
 
     this.db = deps.db;
     this.rigRepo = deps.rigRepo;
+    this.modelMaterializer = deps.modelMaterializer ?? null;
     this.sessionRegistry = deps.sessionRegistry;
     this.eventBus = deps.eventBus;
     this.snapshotRepo = deps.snapshotRepo;
@@ -1059,6 +1063,20 @@ export class RestoreOrchestrator {
     const external = this.sessionRegistry.getBindingForNode(nodeId);
     if (external?.attachmentType === "external_cli") {
       return { nodeId, logicalId: node.logicalId, status: "left_attached", error: leftAttachedReason(external.externalSessionName ?? node.logicalId) };
+    }
+
+    // P25: a seat that asks for its model by rail resolves it NOW, before anything is launched, and restores with what it resolved
+    // (the plan's node carries the model as of the snapshot). A failure holds this seat only, with the reason; nothing is launched.
+    {
+      const { request } = this.rigRepo.getNodeModelRequest(nodeId);
+      if (request !== null) {
+        if (!this.modelMaterializer) {
+          return { nodeId, logicalId: node.logicalId, status: "attention_required", error: `This seat asks for its model by rail (${request}), and no model resolver is configured on this daemon. Nothing was launched.` };
+        }
+        const resolved = await this.modelMaterializer.materialize(nodeId, "restore");
+        if (!resolved.ok) return { nodeId, logicalId: node.logicalId, status: "attention_required", error: resolved.message };
+        node.model = this.rigRepo.getNodeById(nodeId)?.model ?? null;
+      }
     }
 
     // OPR.0.5.7.1 (bought ordering blocker, baton 0efd154d): D1 present-map

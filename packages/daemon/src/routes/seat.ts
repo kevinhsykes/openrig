@@ -21,6 +21,8 @@ import { join } from "node:path";
 import { resolveAuthoredRecapPointer } from "../domain/context-packs/seat-recap-store.js";
 import { buildRebuildPrimingChain } from "../domain/rebuild-priming-chain.js";
 import { OPENRIG_HOME } from "../openrig-compat.js";
+import { NodeModelMaterializer } from "../domain/node-model-materializer.js";
+import { piSeatModelsCheck } from "../domain/pi-seat-models.js";
 import { SettingsStore } from "../domain/user-settings/settings-store.js";
 import { transportSenderSession } from "./require-sender-identity.js";
 import type { SessionTransport } from "../domain/session-transport.js";
@@ -355,6 +357,12 @@ export function seatLifecycleService(c: { get(key: never): unknown }): SeatLifec
     activityOracle: (c.get("seatActivityService" as never) as import("../domain/seat-activity-service.js").SeatActivityService | undefined) ?? undefined,
     transcripts: (c.get("contextUsageStore" as never) as ContextUsageStore | undefined) ?? undefined,
     piRecords: (c.get("currentModelReader" as never) as import("../domain/model-divergence/current-model-reader.js").CurrentModelReader | undefined) ?? undefined,
+    // P25: a seat that asks for its model by rail resolves it here, through OPENRIG_MODEL_RESOLVER; with none set the launch is
+    // refused with the resolver's own "no resolver" reason. A seat with a literal model never reaches it.
+    modelMaterializer: new NodeModelMaterializer({
+      db: rigRepo.db, rigRepo, eventBus: c.get("eventBus" as never) as EventBus,
+      installed: piSeatModelsCheck({ openrigHome: OPENRIG_HOME, rigRepo }),
+    }),
   });
 }
 

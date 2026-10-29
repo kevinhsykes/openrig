@@ -1,3 +1,4 @@
+import { NodeModelMaterializer } from "../src/domain/node-model-materializer.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { TerminalAdapter } from "../src/adapters/terminal-adapter.js";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
@@ -122,6 +123,7 @@ describe("RestoreOrchestrator", () => {
     codex?: CodexResumeAdapter;
     pi?: PiResumeAdapter;
     omp?: OmpResumeAdapter;
+    modelMaterializer?: ConstructorParameters<typeof RestoreOrchestrator>[0]["modelMaterializer"];
     listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
     freshLaunch?: (rigId: string, nodeId: string) => Promise<{
       status: "launched" | "failed" | "attention_required";
@@ -138,6 +140,7 @@ describe("RestoreOrchestrator", () => {
       codexResume: opts?.codex ?? mockCodexResume(),
       piResume: opts?.pi,
       ompResume: opts?.omp,
+      ...(opts?.modelMaterializer ? { modelMaterializer: opts.modelMaterializer } : {}),
       listProcesses: opts?.listProcesses,
       freshLaunch: opts?.freshLaunch,
     });
@@ -671,6 +674,58 @@ describe("RestoreOrchestrator", () => {
     expect(forecast.nodes[0]!.intendedAction).toBe("awaiting-decision");
     expect(forecast.nodes[0]!.reason).toBe(result.result.nodes[0]!.error);
     expect(tmux.createSession).not.toHaveBeenCalled();
+  });
+
+  // P25: a seat that asks for its model by rail resolves it before a restore launches anything.
+  describe("a seat that asks for its model by rail (P25)", () => {
+    const railRig = () => {
+      const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [] });
+      db.prepare("UPDATE nodes SET model = NULL, model_request = 'rail:minimax' WHERE logical_id = 'lead'").run();
+      return snap;
+    };
+    const materializer = (run: import("../src/domain/model-resolver.js").RunCommand) =>
+      new NodeModelMaterializer({ db, rigRepo, eventBus, resolver: { argv: ["resolver", "{rail}"], run } });
+    const refuse: import("../src/domain/model-resolver.js").RunCommand = async () => ({ code: 3, stdout: JSON.stringify({ refuse: true, requested_verdict: "EXHAUSTED" }), stderr: "", timedOut: false });
+    const allow: import("../src/domain/model-resolver.js").RunCommand = async () => ({ code: 0, stdout: JSON.stringify({ refuse: false, pick: { launch: "claude-opus-5-5" } }), stderr: "", timedOut: false });
+    const modelOf = () => (db.prepare("SELECT model FROM nodes WHERE logical_id = 'lead'").get() as { model: string | null }).model;
+
+    it("holds that seat with the resolver's reason and launches nothing when the rail refuses", async () => {
+      const snap = railRig();
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux, modelMaterializer: materializer(refuse) }).restore(snap.id, { freshLogicalIds: ["lead"] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]).toMatchObject({ logicalId: "lead", status: "attention_required", error: expect.stringContaining("EXHAUSTED") });
+      expect(tmux.createSession).not.toHaveBeenCalled();
+      expect(modelOf()).toBeNull();
+    });
+
+    it("holds that seat by name when no resolver is configured", async () => {
+      const snap = railRig();
+      const tmux = mockTmux();
+      const result = await createOrchestrator({ tmux }).restore(snap.id, { freshLogicalIds: ["lead"] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]).toMatchObject({ status: "attention_required", error: expect.stringContaining("no model resolver is configured") });
+      expect(tmux.createSession).not.toHaveBeenCalled();
+    });
+
+    it("restores it with the resolved model when the rail allows", async () => {
+      const snap = railRig();
+      const result = await createOrchestrator({ modelMaterializer: materializer(allow) }).restore(snap.id, { freshLogicalIds: ["lead"] });
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.result.nodes[0]!.status).not.toBe("attention_required");
+      expect(modelOf()).toBe("claude-opus-5-5");
+    });
+
+    it("does not touch a seat with a literal model: no resolver call", async () => {
+      const snap = seedRigAndSnapshot({ nodes: [{ logicalId: "lead", role: "lead", runtime: "claude-code" }], edges: [] });
+      const run = vi.fn(allow);
+      const result = await createOrchestrator({ modelMaterializer: materializer(run) }).restore(snap.id, { freshLogicalIds: ["lead"] });
+      expect(result.ok).toBe(true);
+      expect(run).not.toHaveBeenCalled();
+    });
   });
 
   it("constructor throws on mismatched db handles", () => {
