@@ -547,6 +547,16 @@ function pluginIdOf(revision: string): string | undefined {
   return /^plugin:([^@]+)/.exec(revision)?.[1];
 }
 
+/** P37: the installed plugin's current revision when the skill's source no longer has the recorded bytes, else null. A source
+ *  that cannot be read (the plugin was removed) is null too: the recorded copy is then the only one and is reported as it was. */
+function pluginSourceMovedOn(skill: CatalogSkill, runtime: SkillRuntime): string | null {
+  try {
+    if (inspectSkillDirectory(skill.sourceDir).digest === skill.digest) return null;
+  } catch { return null; }
+  const fresh = resolvePluginSkills({ pluginId: skill.pluginId!, pluginRoot: skill.sourceRoot, runtime }).entries.find((entry) => entry.id === skill.id);
+  return fresh?.revision ?? "with other bytes";
+}
+
 /** A plugin skill left out because a skill OpenRig does not own already has its name. */
 export function isKeptPluginSkill(receipt: SkillProjectionReceipt): boolean {
   return receipt.status === "shadowed" && receipt.detail.startsWith(KEPT_DETAIL);
@@ -960,6 +970,8 @@ export function reconcileSkillLoadout(input: {
   }
   const retainedTopology = new Set(Object.values(topologySelections).flat());
   const effectiveEntries = [...loadoutEntries];
+  // P37: plugin skills carried only by another owner's record (no entry resolved this time). The record is a snapshot; see below.
+  const retainedPluginIds = new Set<string>();
   // Skills the catalog skipped for uncommitted content: named once by the resolver, never an error here.
   const skippedIds = new Set((input.loadout.skipped ?? []).map((skip) => skip.id));
   for (const id of [...retainedTopology].sort(compareBytes)) {
@@ -981,6 +993,7 @@ export function reconcileSkillLoadout(input: {
     }
     if (skippedIds.has(id) && !pathEntryExists(prior.target)) continue;
     const pluginId = pluginIdOf(prior.revision);
+    if (pluginId) retainedPluginIds.add(prior.id);
     effectiveEntries.push({
       id: prior.id,
       sourceDir: prior.sourceDir,
@@ -1051,6 +1064,17 @@ export function reconcileSkillLoadout(input: {
       keptOwned.add(skill.id);
       status = "shadowed";
       detail = `${KEPT_DETAIL}this copy was changed after OpenRig projected it; plugin ${skill.pluginId}'s copy was not projected`;
+    }
+    // P37: a plugin skill kept for another owner is carried by its recorded snapshot, so "current" only says the copy matches the
+    // RECORD. If the plugin it names has moved on (a refresh), say so and name both versions. Nothing is written for it here: the
+    // owner refreshes it at its next launch (the rule the missing/stale path below already states).
+    if (status === "current" && skill.pluginId && retainedPluginIds.has(skill.id)) {
+      const now = pluginSourceMovedOn(skill, input.runtime);
+      if (now) {
+        keptOwned.add(skill.id);
+        status = "shadowed";
+        detail = `${KEPT_DETAIL}plugin ${skill.pluginId} changed since OpenRig projected this copy (recorded ${skill.revision}, installed ${now}); a seat that selects the plugin refreshes it at its next launch`;
+      }
     }
     receipts.push({
       id: skill.id,

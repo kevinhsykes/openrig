@@ -852,6 +852,68 @@ describe("plugin skills in the managed loadout", () => {
     expect(readFileSync(join(f.project, ".claude", "skills", "queue-handoff", "SKILL.md"), "utf8")).toContain("newer plugin bytes");
   });
 
+  // P37: a selection kept for ANOTHER owner is carried by its recorded snapshot. A reader that does not select the plugin used to see
+  // "current / plugin:core@<recorded>" for a plugin that had been refreshed since. It now names both versions and marks the copy
+  // kept (shadowed). Writing stays with the owner: the reader's --apply changes nothing for that skill.
+  describe("a kept plugin selection reports a plugin that has moved on (P37)", () => {
+    const setup = () => {
+      const f = fixture([]);
+      const plugin = writePlugin(f.root, [".claude-plugin"], ["queue-handoff", "delegating-work"]);
+      const entries = () => loadoutOf(resolvePluginSkills({ pluginId: "core", pluginRoot: plugin, runtime: "claude-code" }).entries, f.root);
+      expect(reconcileSkillLoadout({ loadout: entries(), runtime: "claude-code", cwd: f.project, topologyOwner: "seat-a", apply: true }).ok).toBe(true);
+      const refresh = (version: string, body = "# newer plugin bytes\n") => {
+        writeFileSync(join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "core", version, skills: "./skills" }));
+        writeSkill(join(plugin, "skills"), "queue-handoff", "queue-handoff", body);
+      };
+      const reader = (apply = false) => reconcileSkillLoadout({ loadout: loadoutOf([], f.root), runtime: "claude-code", cwd: f.project, topologyOwner: "seat-b", apply });
+      const copy = () => readFileSync(join(f.project, ".claude", "skills", "queue-handoff", "SKILL.md"), "utf8");
+      const manifest = () => readFileSync(join(f.project, ".openrig", "skill-loadouts", "claude-code.json"), "utf8");
+      return { f, plugin, refresh, reader, copy, manifest, entries };
+    };
+
+    it("names the recorded and the installed version for a skill whose plugin moved on, and leaves unchanged skills current", () => {
+      const { refresh, reader } = setup();
+      refresh("2.0.0");
+      const result = reader();
+      expect(result).toMatchObject({ ok: true, applied: false, errors: [] });
+      const moved = result.receipts.find((r) => r.id === "queue-handoff")!;
+      expect(moved.status).toBe("shadowed");
+      expect(moved.detail).toMatch(/recorded plugin:core@1\.2\.3, installed plugin:core@2\.0\.0/);
+      expect(moved.detail).toMatch(/refreshes it at its next launch/);
+      expect(result.receipts.find((r) => r.id === "delegating-work")).toMatchObject({ status: "current", revision: "plugin:core@1.2.3" });
+    });
+
+    it("the reader's --apply writes nothing for it: the copy and the record are the owner's to refresh", () => {
+      const { refresh, reader, copy, manifest } = setup();
+      refresh("2.0.0");
+      const before = manifest();
+      reader(true);
+      expect(copy()).not.toContain("newer plugin bytes");
+      expect(manifest()).toBe(before);
+    });
+
+    it("the owner's next launch still refreshes the copy and the record to the installed version", () => {
+      const { f, refresh, entries, copy, manifest } = setup();
+      refresh("2.0.0");
+      expect(reconcileSkillLoadout({ loadout: entries(), runtime: "claude-code", cwd: f.project, topologyOwner: "seat-a", apply: true })).toMatchObject({ ok: true, applied: true });
+      expect(copy()).toContain("newer plugin bytes");
+      expect(manifest()).toContain("plugin:core@2.0.0");
+    });
+
+    it("an unchanged plugin still reads as current at its recorded version", () => {
+      const { reader } = setup();
+      expect(reader().receipts.map((r) => [r.id, r.status, r.revision])).toEqual([["delegating-work", "current", "plugin:core@1.2.3"], ["queue-handoff", "current", "plugin:core@1.2.3"]]);
+    });
+
+    it("a plugin that is gone is reported as recorded: the recorded copy is the only one", () => {
+      const { plugin, reader } = setup();
+      rmSync(plugin, { recursive: true, force: true });
+      const result = reader();
+      expect(result.errors).toEqual([]);
+      expect(result.receipts.map((r) => [r.id, r.status])).toEqual([["delegating-work", "current"], ["queue-handoff", "current"]]);
+    });
+  });
+
   it("keeps an edit to its own plugin copy under the same ownership record", () => {
     const f = fixture([]);
     const plugin = writePlugin(f.root, [".claude-plugin"], ["queue-handoff"]);
