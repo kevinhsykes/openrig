@@ -12,6 +12,8 @@ import { EventBus } from "../src/domain/event-bus.js";
 import { NodeLauncher } from "../src/domain/node-launcher.js";
 import { StartupOrchestrator } from "../src/domain/startup-orchestrator.js";
 import { SeatLifecycleService } from "../src/domain/seat-lifecycle-service.js";
+import { NodeModelMaterializer } from "../src/domain/node-model-materializer.js";
+import type { RunCommand } from "../src/domain/model-resolver.js";
 import { getNodeInventory } from "../src/domain/node-inventory.js";
 import { PsProjectionService } from "../src/domain/ps-projection.js";
 import { SeatIdentityStore } from "../src/domain/seat-identity-store.js";
@@ -58,6 +60,9 @@ describe("SeatLifecycleService.launchFresh", () => {
   let activitySwaps: Array<{ nodeId: string; generation: string }>;
   let service: SeatLifecycleService;
   let listProcesses: NativeProcessLister;
+  // P25: the rail resolver the service launches through; a seat with a literal model must never reach it.
+  let railResolver: RunCommand;
+  let resolverCalls: string[][];
 
   beforeEach(() => {
     db = createFullTestDb();
@@ -130,7 +135,10 @@ describe("SeatLifecycleService.launchFresh", () => {
     listProcesses = async () => [{ pid: 4242, ppid: 1, pgid: 4242, tpgid: 4242,
       executableName: "codex", command: "/opt/native/codex -m model", startedAt: "Sat Jan  1 12:00:00 2000" }];
     runtimeAdapters = { "claude-code": adapter, codex: { ...adapter, runtime: "codex" } };
+    resolverCalls = [];
+    railResolver = async () => { throw new Error("the rail resolver must not be called for this seat"); };
     service = new SeatLifecycleService({
+      modelMaterializer: new NodeModelMaterializer({ db, rigRepo, eventBus, resolver: { argv: ["resolver", "{rail}"], run: (argv, ms) => { resolverCalls.push(argv); return railResolver(argv, ms); } } }),
       db,
       rigRepo,
       sessionRegistry,
@@ -359,6 +367,60 @@ describe("SeatLifecycleService.launchFresh", () => {
     }
     return { rig, node, session, sessionName };
   }
+
+  describe("a seat that asks for its model by rail (P25)", () => {
+    const railSeat = () => {
+      const seat = seedSeat();
+      db.prepare("UPDATE nodes SET model = NULL, model_request = 'rail:minimax' WHERE id = ?").run(seat.node.id);
+      return seat;
+    };
+    const resolves = (launch: string): RunCommand => async () => ({ code: 0, stdout: JSON.stringify({ refuse: false, pick: { launch } }), stderr: "", timedOut: false });
+    const modelOf = (id: string) => (db.prepare("SELECT model FROM nodes WHERE id = ?").get(id) as { model: string | null }).model;
+
+    it("launches with the resolved model, which was written to the seat before the harness read it", async () => {
+      const seat = railSeat();
+      railResolver = resolves("minimax/MiniMax-M3");
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "rail launch" });
+      expect(result.ok, JSON.stringify(result)).toBe(true);
+      expect(launchBinding).toMatchObject({ model: "minimax/MiniMax-M3" });
+      expect(modelOf(seat.node.id)).toBe("minimax/MiniMax-M3");
+      expect(resolverCalls).toEqual([["resolver", "minimax"]]);
+    });
+
+    it("a resolver that refuses stops the launch: no new session, no harness launch, the old occupant is left running", async () => {
+      const seat = railSeat();
+      railResolver = async () => ({ code: 3, stdout: JSON.stringify({ refuse: true, requested_verdict: "EXHAUSTED" }), stderr: "", timedOut: false });
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "rail launch" });
+      expect(result).toMatchObject({ ok: false, code: "model_rail_gate_refused" });
+      expect(launchBinding).toBeNull();
+      expect(killed).toEqual([]);
+      expect(alive.has(seat.sessionName)).toBe(true);
+      expect(modelOf(seat.node.id)).toBeNull();
+    });
+
+    it("a daemon with no resolver configured refuses by name instead of launching a default model", async () => {
+      const seat = railSeat();
+      const bare = new SeatLifecycleService({ db, rigRepo, sessionRegistry, eventBus, tmuxAdapter: tmux, listProcesses: () => listProcesses(), runtimeAdapters });
+      expect(await bare.launchFresh({ seatRef: seat.sessionName, fresh: true, reason: "rail launch" })).toMatchObject({ ok: false, code: "model_rail_unconfigured" });
+      expect(launchBinding).toBeNull();
+    });
+
+    it("a seat with a literal model never reaches the resolver", async () => {
+      const seat = seedSeat();
+      const result = await service.launchFresh({ seatRef: seat.sessionName, fresh: true, stop: true, reason: "literal launch" });
+      expect(result.ok).toBe(true);
+      expect(resolverCalls).toEqual([]);
+      expect(launchBinding).toMatchObject({ model: "claude-current" });
+    });
+
+    it("set-model on a rail seat is refused by name and changes nothing", async () => {
+      const seat = railSeat();
+      const result = await service.setModel({ seatRef: seat.sessionName, model: "opus", reason: "try" });
+      expect(result).toMatchObject({ ok: false, code: "model_rail_set_refused" });
+      expect((result as { message: string }).message).toContain("rail:minimax");
+      expect(modelOf(seat.node.id)).toBeNull();
+    });
+  });
 
   // OPR.0.7.0.9: the fresh-launch plan lists the seat's own launch additions (what its launch will pass), and null for
   // a seat without any. It writes nothing.

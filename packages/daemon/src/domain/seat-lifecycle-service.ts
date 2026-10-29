@@ -93,6 +93,8 @@ export interface SeatLifecycleDeps {
   transcripts?: { readSidecar(sessionName: string): { ok: true; data: { transcript_path?: string | null; session_id?: string | null } } | { ok: false }; readCodexTranscriptPath(threadId: string): string | null };
   /** The identity-verified current Pi runner and its own session file; without it a Pi seat's launch and native effort are unknown. */
   piRecords?: Pick<CurrentModelReader, "currentPiRecord">;
+  /** P25: resolves a seat's rail request into the model it launches with. Without it a seat that asks for a rail is refused. */
+  modelMaterializer?: Pick<import("./node-model-materializer.js").NodeModelMaterializer, "hasRequest" | "materialize">;
 }
 
 interface ResolvedSeat {
@@ -149,7 +151,11 @@ export interface SeatRefusal {
     | "guard_unavailable"
     | "guard_target_changed"
     | "selection_changed"
-    | "stop_uncertain";
+    | "stop_uncertain"
+    // P25: a seat that asks for its model by rail.
+    | "model_rail_unconfigured"
+    | "model_rail_set_refused"
+    | import("./node-model-materializer.js").MaterializeFailureCode;
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
@@ -310,6 +316,7 @@ export class SeatLifecycleService {
   private readonly inPlaceRestartDaemonStartedAt?: Date;
   private readonly transcripts: SeatLifecycleDeps["transcripts"] | null;
   private readonly piRecords: SeatLifecycleDeps["piRecords"] | null;
+  private readonly modelMaterializer: SeatLifecycleDeps["modelMaterializer"] | null;
 
   constructor(deps: SeatLifecycleDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("SeatLifecycleService: rigRepo must share the same db handle");
@@ -330,6 +337,7 @@ export class SeatLifecycleService {
     this.inPlaceRestartTiming = deps.inPlaceRestartTiming;
     this.inPlaceRestartDaemonStartedAt = deps.inPlaceRestartDaemonStartedAt;
     this.transcripts = deps.transcripts ?? null;
+    this.modelMaterializer = deps.modelMaterializer ?? null;
     this.piRecords = deps.piRecords ?? null;
   }
 
@@ -375,6 +383,18 @@ export class SeatLifecycleService {
     }
   }
 
+  /** P25: a seat that asks for its model by rail gets it resolved NOW, before the launch reads node.model; any failure refuses the
+   *  launch and changes nothing. A seat with no request returns null without a resolver call. */
+  private async materializeSeatModel(nodeId: string): Promise<SeatRefusal | null> {
+    const { request } = this.rigRepo.getNodeModelRequest(nodeId);
+    if (request === null) return null;
+    if (!this.modelMaterializer) {
+      return { ok: false, code: "model_rail_unconfigured", message: `This seat asks for its model by rail (${request}), and no model resolver is configured on this daemon. Nothing was launched.` };
+    }
+    const out = await this.modelMaterializer.materialize(nodeId, "fresh launch");
+    return out.ok ? null : { ok: false, code: out.code, message: out.message };
+  }
+
   async setModel(input: SeatSettingTarget & { model: string; reason: string; operator?: string | null }): Promise<SetModelResult> {
     const required = this.requireReason(input.reason);
     if (required) return required;
@@ -383,6 +403,13 @@ export class SeatLifecycleService {
     }
     const resolved = this.resolveSettingTarget(input);
     if ("code" in resolved) return resolved;
+    {
+      // P25: the launch writes this seat's model from its rail request, so a hand-set value would be overwritten at the next launch.
+      const { request } = this.rigRepo.getNodeModelRequest(resolved.nodeId);
+      if (request !== null) {
+        return { ok: false, code: "model_rail_set_refused", message: `This seat asks for its model by rail (${request}); its model is chosen when it launches, so set-model would be overwritten. Change the rail in the spec, or give the seat a literal model.` };
+      }
+    }
 
     const model = input.model.trim();
     const seat = this.describe(resolved);
@@ -1468,6 +1495,8 @@ export class SeatLifecycleService {
     if (guard && !guard.ownsLifecycle(resolved.nodeId)) {
       return guard.lifecycle([resolved.nodeId], () => this.launchFresh(input));
     }
+    const modelHold = await this.materializeSeatModel(resolved.nodeId);
+    if (modelHold) return modelHold;
     const prepared = this.resolveFreshLaunch(resolved, input.seatRef);
     if ("code" in prepared) return prepared;
     const { seat, node, adapter, startup, canonicalSessionName, nodeLauncher, startupOrchestrator } = prepared;
