@@ -787,6 +787,12 @@ export class RigRepository {
     return result.changes > 0;
   }
 
+  /** One node by its immutable id, or null. */
+  getNodeById(nodeId: string): Node | null {
+    const row = this.db.prepare("SELECT * FROM nodes WHERE id = ?").get(nodeId) as NodeRow | undefined;
+    return row ? this.rowToNode(row) : null;
+  }
+
   /** P25: what the seat asked for by rail and the latest resolution, or nulls for a seat that names a literal model (and for a
    *  database without migration 142). */
   getNodeModelRequest(nodeId: string): { request: string | null; resolutionJson: string | null } {
