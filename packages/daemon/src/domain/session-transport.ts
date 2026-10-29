@@ -39,7 +39,7 @@ import type { AgentActivity } from "./types.js";
 import { DeliveryGuardError, type AdmissionInput, type GuardTarget, type SeatDeliveryGuard } from "./seat-delivery-guard.js";
 import { withUrgentLine } from "./urgent-line.js";
 import { wrapPaneEnvelope, appendDeliveredSegment, type EnvelopeScope } from "../lib/pane-envelope.js";
-import { isBoundTerminalSeat, terminalSeatExpectsAgent } from "./terminal-seat.js";
+import { isAgentPaneCommand, isBareTerminalSeat, isBoundTerminalSeat, terminalSeatExpectsAgent, terminalSeatHostsAgent } from "./terminal-seat.js";
 import { resolveGuardTarget } from "./seat-delivery-guard.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { SeatIdentityStore } from "./seat-identity-store.js";
@@ -2381,7 +2381,8 @@ export class SessionTransport {
     // segment must never edit a line of the exact text.
     if (opts?.exactText !== undefined && !opts.dangerouslyInteract) {
       const { exactText, ...rest } = opts;
-      if (!isBoundTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
+      // An agent seat declared runtime terminal (P27) wants the envelope like any agent; a shell or TUI gets the exact text.
+      if (!isBareTerminalSeat(this.db, sessionName)) return this.send(sessionName, text, rest);
       return { ...(await this.send(sessionName, exactText, { ...rest, stampISO: undefined, typedExactly: true })), envelopeOmitted: true };
     }
     const observe = () => { try { return this.compactionObserver?.(sessionName) ?? null; } catch { return null; } };
@@ -2417,12 +2418,24 @@ export class SessionTransport {
     const target = resolveGuardTarget(this.db, sessionName);
     if (!target?.pane) return null;
     const node = this.db.prepare("SELECT logical_id AS logicalId FROM nodes WHERE id = ?").get(target.nodeId) as { logicalId: string } | undefined;
-    if (!node || !terminalSeatExpectsAgent(this.db, (nodeId) => this.rigRepo.getNodeLaunchRecipe(nodeId), { id: target.nodeId, logicalId: node.logicalId })) return null;
+    // P27/P27b: a seat RECORDED as holding an agent is typed into only while its live pane is a known agent: a shell, the person's
+    // TUI (`node`), an unlisted command and an unreadable pane are all held. The record can be old, so it never decides alone.
+    // A seat that only EXPECTS an agent (its startup launches one, P18) keeps the P18 rule: held only at a bare shell.
+    if (!node) return null;
+    const recordedAgent = terminalSeatHostsAgent(this.db, sessionName);
+    if (!recordedAgent && !terminalSeatExpectsAgent(this.db, (nodeId) => this.rigRepo.getNodeLaunchRecipe(nodeId), { id: target.nodeId, logicalId: node.logicalId })) return null;
     const pane = target.pane;
     // Everything above is synchronous, so a send to any other seat starts its first tmux call in the same turn as before.
     return (async () => {
-      let command: string | null;
-      try { command = await this.tmuxAdapter.getPaneCommand(pane); } catch { return null; }
+      let command: string | null = null;
+      let read = true;
+      try { command = await this.tmuxAdapter.getPaneCommand(pane); } catch { read = false; }
+      if (recordedAgent && !(command && isShellForeground(command)) && !isAgentPaneCommand(command)) {
+        return {
+          ok: false, sessionName, sent: false, outcome: "failed", reason: "terminal_foreground_not_agent",
+          error: `Held, nothing typed: ${sessionName} is recorded as running an agent, but its pane ${pane} is running ${read && command?.trim() ? `"${command.replace(/^-/, "")}"` : "a command that could not be read"}, which is not a known agent, so the message could reach a program that is not an agent (the person's TUI, a prompt). Restart the seat's agent, then send again.`,
+        } as SendResult;
+      }
       if (!command || !isShellForeground(command)) return null;
       return {
         ok: false, sessionName, sent: false, outcome: "failed", reason: "terminal_agent_not_running",
@@ -2707,6 +2720,9 @@ export class SessionTransport {
 
   private async sendUnguarded(sessionName: string, text: string, opts?: SendOpts): Promise<SendResult> {
     sessionName = physicalSessionName(this.db, sessionName);
+    // P27b: the last step before anything is typed. Retained/guarded delivery calls this directly, not through sendClassified, so the
+    // live-pane check is repeated here; it costs one tmux read, and only for a terminal seat that hosts or expects an agent.
+    { const hold = this.terminalAgentNotRunning(sessionName, opts); if (hold) { const held = await hold; if (held) return held; } }
     let preVerifyContent: string | null = null;
     const sessionMeta = this.getSessionMeta(sessionName);
     const runtime = sessionMeta.runtime;
@@ -3220,9 +3236,16 @@ export class SessionTransport {
       if (writeIssued && error && typeof error === "object") (error as { inputAttempted?: boolean }).inputAttempted = true;
       throw error;
     };
+    // P27c: the entry check above ran before the readiness wait, the capture and the copy-mode read. The foreground can change in
+    // that time (pi exits, `rig tui` starts), so the positive pane check is repeated as the LAST step before the text is handed to
+    // tmux: it is the first statement of the stage callback and the typing call follows it with no await between them. The check
+    // is synchronous to a null for every seat it does not apply to, so those sends gain no tmux read.
+    let finalHold: SendResult | null = null;
     const textResult = await this.runStage(
       "session_transport.send_text",
-      () => {
+      async () => {
+        const hold = this.terminalAgentNotRunning(sessionName, opts);
+        if (hold) { finalHold = await hold; if (finalHold) return { ok: false as const, code: "terminal_final_hold", message: "held" } as never; }
         opts?.beforeWrite?.();
         writeIssued = true;
         if (promptOverride) return this.tmuxAdapter.sendText(sessionName, text, beforePaste, { bracketed: false, beforePaste: overrideBeforePaste });
@@ -3230,6 +3253,7 @@ export class SessionTransport {
       },
       (result) => result.ok ? "ok" : "failed",
     ).catch(tagIssued);
+    if (finalHold) return observe({ ...(finalHold as SendResult), inputPhase: "not_reached" as const, ...(waitMode ? { sent: false, ...waitEvidence } : {}) });
     if (!textResult.ok && textResult.code === CALLER_CANCELLED && cancel?.aborted) {
       return observe({ ...callerCancelled(sessionName), ...(waitMode ? waitEvidence : {}) });
     }

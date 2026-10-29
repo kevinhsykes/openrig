@@ -2838,6 +2838,126 @@ describe("SessionTransport", () => {
     expect(sent).toEqual([HEREDOC]);
   });
 
+  // P27: a Pi/agent seat is declared runtime `terminal` and launched through a harness. What holds its pane is recorded
+  // (seat_identity_verdicts.observed_command). An agent there wants the envelope; a shell or the human's TUI does not.
+  function recordPane(command: string | null, pane = "%1") {
+    const node = db.prepare("SELECT id FROM nodes WHERE logical_id = 'infra.ui'").get() as { id: string };
+    sessionRegistry.updateBinding(node.id, { tmuxSession: "infra-ui@term-rig", tmuxPane: pane });
+    db.prepare("INSERT OR REPLACE INTO seat_identity_verdicts (node_id, verdict, observed_command, registered_pane, session_name, observed_at) VALUES (?, 'verified', ?, ?, 'infra-ui@term-rig', ?)")
+      .run(node.id, command, pane, new Date().toISOString());
+  }
+
+  it("P27: a terminal seat whose pane is recorded as a known agent (pi) gets the envelope, not the exact text", async () => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "pi", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result.ok).toBe(true);
+    expect(result.envelopeOmitted).toBeUndefined();
+    expect(sent).toEqual([H_ENVELOPE]);
+  });
+
+  it.each([["node"], ["bash"], [null], ["some-unknown-tool"]])("P27: a terminal seat recorded as %s (a TUI, a shell, nothing, unknown) still gets exactText", async (command) => {
+    seedTerminalSeat();
+    recordPane(command);
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result.envelopeOmitted).toBe(true);
+    expect(sent).toEqual([HEREDOC]);
+  });
+
+  it("P27: an agent seat whose pane has fallen back to a bare shell is held, whatever was recorded", async () => {
+    seedTerminalSeat();
+    recordPane("pi");   // the record is old; the live pane is at zsh now
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "zsh", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result).toMatchObject({ ok: false, sent: false, reason: "terminal_agent_not_running" });
+    expect(sent).toEqual([]);
+  });
+
+  // P27b (CRITICAL review of c2e2deb42): the live check must be POSITIVE. It stopped only a shell, so a stale `pi` record
+  // with the person's `rig tui` (a `node` process) now in the pane would have had the wake typed into the TUI.
+  it.each([["node", "the human's rig tui"], ["some-unknown-tool", "an unlisted command"], ["rig", "an unlisted command"]])(
+    "P27b: recorded as pi but the live pane runs %s (%s): nothing is typed, held by name", async (live) => {
+      seedTerminalSeat();
+      recordPane("pi");
+      const sent: string[] = [];
+      const tmux = mockTmux({ getPaneCommand: async () => live, sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+      const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "terminal_foreground_not_agent" });
+      expect(String(result.error)).toContain(live);
+      expect(sent).toEqual([]);
+    });
+
+  it.each([["throws", async () => { throw new Error("tmux gone"); }], ["answers nothing", async () => null], ["answers blank", async () => "  "]])(
+    "P27b: recorded as pi and the live pane cannot be read (%s): held, nothing typed", async (_l, read) => {
+      seedTerminalSeat();
+      recordPane("pi");
+      const sent: string[] = [];
+      const tmux = mockTmux({ getPaneCommand: read as never, sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+      const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, {});
+      expect(result).toMatchObject({ ok: false, sent: false, reason: "terminal_foreground_not_agent" });
+      expect(sent).toEqual([]);
+    });
+
+  it.each([["pi"], ["-pi"], ["Vibe"], ["command-code"]])("P27b: recorded as an agent and the live pane runs %s: typed", async (live) => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => live, sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, {});
+    expect(result.ok).toBe(true);
+    expect(sent).toEqual([H_ENVELOPE]);
+  });
+
+  it("P27b: the last step before typing (sendUnguarded, which retained/guarded delivery calls directly) holds a stale pi + live node too", async () => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "node", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await (createTransport(tmux) as unknown as { sendUnguarded(s: string, t: string, o?: object): Promise<{ ok: boolean; reason?: string }> })
+      .sendUnguarded("infra-ui@term-rig", H_ENVELOPE, {});
+    expect(result).toMatchObject({ ok: false, reason: "terminal_foreground_not_agent" });
+    expect(sent).toEqual([]);
+  });
+
+  // P27c (OpenAI review of 41c2b2d0a): the entry check passes, the foreground then flips pi -> node while the send waits
+  // (readiness / capture / copy-mode reads), and the check must be repeated right before the text is handed to tmux.
+  it.each([["send", false], ["sendUnguarded", true]])("P27c: pi at entry, node by the time of typing (%s): nothing typed, held by name", async (_n, direct) => {
+    seedTerminalSeat();
+    recordPane("pi");
+    const sent: string[] = [];
+    let live = "pi";
+    const tmux = mockTmux({
+      getPaneCommand: async () => live,
+      // every read other than the pane command is part of the wait before typing: the foreground flips during it
+      capturePaneContent: async () => { live = "node"; return "> "; },
+      isPaneInMode: async () => { live = "node"; return false; },
+      sendText: async (_t, text) => { sent.push(text); return { ok: true }; },
+    } as never);
+    const t = createTransport(tmux);
+    const result = direct
+      ? await (t as unknown as { sendUnguarded(s: string, x: string, o?: object): Promise<{ ok: boolean; reason?: string }> }).sendUnguarded("infra-ui@term-rig", H_ENVELOPE, {})
+      : await t.send("infra-ui@term-rig", H_ENVELOPE, {});
+    expect(live).toBe("node");   // the flip really happened during the send, or this test proves nothing
+    expect(result).toMatchObject({ ok: false, reason: "terminal_foreground_not_agent" });
+    expect(sent).toEqual([]);
+  });
+
+  it("P27b: a record that belongs to an older session is not an agent record: exactText as for any bare terminal seat", async () => {
+    seedTerminalSeat();
+    recordPane("pi");
+    db.prepare("UPDATE seat_identity_verdicts SET session_name = 'infra-ui@an-earlier-rig-name'").run();   // written for a previous occupant/name
+    const sent: string[] = [];
+    const tmux = mockTmux({ getPaneCommand: async () => "pi", sendText: async (_t, text) => { sent.push(text); return { ok: true }; } });
+    const result = await createTransport(tmux).send("infra-ui@term-rig", H_ENVELOPE, { exactText: HEREDOC });
+    expect(result.envelopeOmitted).toBe(true);
+    expect(sent).toEqual([HEREDOC]);
+  });
+
   it("send to an agent seat ignores exactText and keeps the envelope", async () => {
     seedCanonicalRig();
     const sent: string[] = [];

@@ -14,7 +14,7 @@ import type { QueueWakeFacts } from "./draft-aware-delivery.js";
 import { derivePickup, type PickupReceipt } from "./queue-pickup.js";
 import { lastMeaningfulTransition, readWaitingView, type WaitingView, type WaitingActivityReader } from "./queue-waiting.js";
 import { isOpenRigSender, OPENRIG_SENDER, wrapPaneEnvelope } from "../lib/pane-envelope.js";
-import { isBoundTerminalSeat } from "./terminal-seat.js";
+import { isBareTerminalSeat } from "./terminal-seat.js";
 import { renderQueueHandoffNudge } from "./queue-nudge-text.js";
 import { getSelfHostId } from "./hosts/fanout-contract.js";
 import { parseSessionName, isHumanSeatSessionRef } from "./session-name.js";
@@ -1765,7 +1765,8 @@ export class QueueRepository {
     // command line (it carries the row's summary), and nothing there can claim the row. So nothing
     // is typed; the row stays queued and visible. `failed:` keeps it on the wake ladder, whose
     // retries come back here and type nothing before it escalates.
-    if (isBoundTerminalSeat(this.db, destinationSession)) {
+    // (A terminal-runtime seat that hosts an agent, e.g. a Pi seat, is not this case: P27.)
+    if (isBareTerminalSeat(this.db, destinationSession)) {
       return {
         classified: "failed",
         nudgeResult: `failed:terminal-seat: '${destinationSession}' is a terminal seat (runtime: terminal), not an agent, so no wake was typed into it and nothing there can claim this row. The row stays queued; route it to an agent seat.`,
