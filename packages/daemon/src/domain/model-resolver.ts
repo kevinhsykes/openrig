@@ -5,6 +5,7 @@
 // FAIL CLOSED. Every way the answer can be missing, late, malformed or negative is a refusal with a named code and the
 // resolver's own reason. There is no fallback to a literal, a default, or a previous answer.
 import { execFile } from "node:child_process";
+import { hookChildEnv } from "./hook-child-env.js";
 
 /** What a spec's `model` asks for: a literal id (unchanged behaviour) or a rail the resolver picks a model for. */
 export type ModelRequest =
@@ -101,7 +102,7 @@ export function resolverArgvFromEnv(env: NodeJS.ProcessEnv = process.env): { ok:
 export const execFileRunner: RunCommand = (argv, timeoutMs) =>
   new Promise((resolve) => {
     const [file, ...args] = argv;
-    execFile(file!, args, { timeout: timeoutMs, maxBuffer: MAX_OUTPUT_BYTES, encoding: "utf8", windowsHide: true, killSignal: "SIGKILL" },
+    execFile(file!, args, { timeout: timeoutMs, maxBuffer: MAX_OUTPUT_BYTES, encoding: "utf8", windowsHide: true, killSignal: "SIGKILL", env: hookChildEnv() },
       (error, stdout, stderr) => {
         if (!error) return resolve({ code: 0, stdout, stderr, timedOut: false });
         const e = error as NodeJS.ErrnoException & { killed?: boolean; code?: number | string };
